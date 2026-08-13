@@ -38,6 +38,9 @@ func main() {
 	case "agents":
 		runAgents(os.Args[2:])
 
+	case "handoff":
+		runHandoff(os.Args[2:])
+
 	default:
 		fmt.Printf("unknown command: %s\n\n", os.Args[1])
 		printUsage()
@@ -94,7 +97,12 @@ func printUsage() {
   swarm sessions remove
   swarm agents start [role]
   swarm agents list
-  swarm agents stop [role]`)
+  swarm agents stop [role]
+  swarm handoff send --from <role> --to <role> --type <type> --note <text> [...]
+  swarm handoff inbox <role>
+  swarm handoff outbox <role>
+  swarm handoff ack <role> <file>
+  swarm handoff daemon`)
 }
 
 func printRoles() {
