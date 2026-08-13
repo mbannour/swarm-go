@@ -246,6 +246,13 @@ func SortEntries(entries []Entry) {
 	})
 }
 
+// ListDir returns the parsable entries of any handoff directory, plus the
+// names of files that could not be parsed. It is used for the shared
+// directories that belong to no role, such as rejected/.
+func (s *Store) ListDir(dir string) (entries []Entry, bad []string, err error) {
+	return s.list(dir)
+}
+
 // List returns the parsable entries of one of a role's boxes.
 func (s *Store) List(role, box string) ([]Entry, error) {
 	dir, err := s.Box(role, box)

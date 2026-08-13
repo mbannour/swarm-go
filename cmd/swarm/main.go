@@ -17,6 +17,15 @@ func main() {
 
 	switch os.Args[1] {
 
+	case "start":
+		runStart(os.Args[2:])
+
+	case "stop":
+		runStop(os.Args[2:])
+
+	case "logs":
+		runLogs(os.Args[2:])
+
 	case "config":
 		printConfig()
 
@@ -42,7 +51,7 @@ func main() {
 		runHandoff(os.Args[2:])
 
 	case "status":
-		runStatus()
+		runStatus(os.Args[2:])
 
 	default:
 		fmt.Printf("unknown command: %s\n\n", os.Args[1])
@@ -87,6 +96,11 @@ func printConfig() {
 
 func printUsage() {
 	fmt.Println(`Usage:
+  swarm start                 bring the whole four-pack up
+  swarm status [--json]       read-only overview
+  swarm stop                  stop processes, keep durable state
+  swarm logs daemon
+
   swarm version
   swarm roles
   swarm doctor

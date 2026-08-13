@@ -12,6 +12,7 @@ import (
 	"github.com/mbannour/swarm-go/internal/config"
 	"github.com/mbannour/swarm-go/internal/git"
 	"github.com/mbannour/swarm-go/internal/handoff"
+	"github.com/mbannour/swarm-go/internal/lifecycle"
 	"github.com/mbannour/swarm-go/internal/tmux"
 )
 
@@ -428,6 +429,18 @@ func handoffDaemon(store *handoff.Store, roles []string, repoRoot string, args [
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
+	// Single-instance protection: one daemon per repository. Ownership is an
+	// flock held for this process's lifetime, so a crash releases it
+	// immediately and a leftover file never blocks a restart.
+	lock, held, err := lifecycle.AcquireDaemonLock(repoRoot)
+	if err != nil {
+		return err
+	}
+	if !held {
+		return fmt.Errorf("handoff daemon already running for this repository")
+	}
+	defer lifecycle.ReleaseDaemonLock(repoRoot, lock)
 
 	var notifier handoff.Notifier
 	if !*quiet {

@@ -20,6 +20,7 @@ Clojure, no shell orchestration: one static binary and the standard library.
 - [Configuration: `swarm.conf`](#configuration-swarmconf)
 - [Prompts](#prompts)
 - [Command reference](#command-reference)
+  - [Lifecycle: `start`, `status`, `stop`](#lifecycle-start-status-stop)
   - [Handoffs](#handoffs)
   - [Routing work onward: `next`](#routing-work-onward-next)
   - [Send before done](#send-before-done)
@@ -133,38 +134,38 @@ Run these **from the root of the repository you want the agents to work on**.
 git add -A && git commit -m "initial commit"
 go build -o ./bin/swarm ./cmd/swarm
 
-# 1. four isolated worktrees + branches
-./bin/swarm worktrees create
+# 1. bring up everything: worktrees, daemon, sessions, agents
+./bin/swarm start
 
-# 2. four tmux sessions, one per worktree
-./bin/swarm sessions create
-
-# 3. launch the agents with their role prompts + the handoff protocol
-./bin/swarm agents start
-
-# 4. in a second terminal: deliver handoffs between roles, continuously
-./bin/swarm handoff daemon
-
-# 5. give the swarm something to do
+# 2. give the swarm something to do
 ./bin/swarm handoff send --from architect --to specifier \
   --type note --priority 20 --note "Add rate limiting to the login endpoint"
 
-# 6. watch it flow
+# 3. watch it flow
 ./bin/swarm status
 ```
 
+That is the whole workflow. `swarm start` runs the pipeline in order and leaves
+a background handoff daemon running — you do **not** need a second terminal, and
+the terminal you started from can be closed.
+
 From here the agents drive themselves: each one runs `handoff ready`, does its
 role's job, sends the result to the next role with `handoff next`, and calls
-`handoff done`. You can do the same by hand at any time — the commands are the
-same ones the agents use.
+`handoff done`. You can run the same commands by hand at any time.
 
 To shut down:
 
 ```bash
-./bin/swarm agents stop        # stop agents, keep terminals
-./bin/swarm sessions remove    # close the terminals
-./bin/swarm worktrees remove   # remove the worktrees
+./bin/swarm stop     # stops agents, sessions and the daemon
 ```
+
+`stop` is **not** cleanup: worktrees, branches and every handoff survive, so
+`swarm start` picks up exactly where the swarm left off. To reclaim the
+worktrees as well, run `./bin/swarm worktrees remove` afterwards.
+
+The individual commands (`worktrees`, `sessions`, `agents`, `handoff daemon`)
+all still exist and are documented below — `start` and `stop` just compose them
+in the right order.
 
 ## How it is laid out on disk
 
@@ -187,9 +188,15 @@ your-project/
     │   ├── wt-refactorer/
     │   └── wt-architect/
     ├── runtime/
-    │   └── prompts/        # assembled prompts actually handed to agents
-    │       ├── specifier.prompt
-    │       └── …
+    │   ├── prompts/        # assembled prompts actually handed to agents
+    │   │   ├── specifier.prompt
+    │   │   └── …
+    │   ├── logs/
+    │   │   └── handoffd.log   # the background daemon's output
+    │   ├── handoffd.lock   # held by the running daemon (flock)
+    │   ├── handoffd.pid    # its recorded identity
+    │   ├── lifecycle.lock  # held during start/stop
+    │   └── state.json      # metadata only, never authoritative
     └── handoffs/           # durable messages between roles
         ├── coder/
         │   ├── outbox/     # queued, waiting for the daemon
@@ -347,39 +354,181 @@ Secrets must never be put into a handoff.
 ### Environment
 
 ```bash
-swarm status      # one read-only overview of the whole four-pack
 swarm version     # print the version
 swarm doctor      # check git, tmux and agent backends
 swarm roles       # list the four-pack role names
 swarm config      # parse and print swarm.conf
 ```
 
-`swarm status` is the command to reach for when you want to know what the swarm
-is doing:
+### Lifecycle: `start`, `status`, `stop`
 
-```
-FOUR-PACK STATUS
+These three compose everything else. Reach for them first.
 
-ROLE         AGENT            WORK       INBOX     TASK
-specifier    running          waiting    0         -
-coder        running          working    1         RATE-1
-refactorer   running          waiting    0         -
-architect    running          waiting    0         -
-
-ROUTE
-  specifier -> coder
-  coder -> refactorer
-  refactorer -> architect
-  architect -> specifier
-
-PENDING DELIVERY
-  none
+```bash
+swarm start           # preflight, then bring the whole four-pack up
+swarm start -v        # …with per-step detail
+swarm status          # read-only overview
+swarm status --json   # the same, machine-readable
+swarm status --strict # exit non-zero unless healthy (for CI)
+swarm stop            # stop processes, keep all durable state
+swarm logs daemon     # the background daemon's log
 ```
 
-`AGENT` is the process state, `WORK` is the lifecycle state derived from the
-filesystem (`working` = something in `current/`, `ready` = inbox waiting,
-`waiting` = idle). A task shown as `RATE-1 (handed off)` means the downstream
-handoff already exists and only `done` is outstanding.
+#### `swarm start`
+
+Preflight runs **before** anything is touched, so a missing dependency fails
+without leaving half a swarm behind:
+
+```
+Swarm preflight
+
+✓ Git repository
+✓ configuration
+✓ worktree paths
+✓ tmux
+✓ agent backends
+✓ prompts
+✓ runtime directory
+
+Starting swarm
+
+✓ worktree:specifier     started
+✓ daemon                 started
+✓ session:specifier      started
+✓ agent:specifier        started
+…
+
+Swarm is ready.
+```
+
+The order is fixed and matters: **worktrees → daemon → sessions → agents**. A
+session starts *inside* its worktree, so worktrees come first; the daemon comes
+before the agents so the first handoff an agent produces is delivered
+immediately.
+
+`start` is **idempotent and repairing**. Run it twice and nothing is
+duplicated:
+
+```
+○ worktree:coder         already running
+○ daemon                 already running
+○ session:coder          already running
+○ agent:coder            already running
+
+Swarm was already running.
+```
+
+If one role's session died, a later `start` restores just that role. If a
+component fails to start, the ones that came up are **kept**, the failure is
+reported, and the command exits non-zero:
+
+```
+✗ session:refactorer     <the real error>
+
+Swarm startup incomplete.
+…
+Fix the reported problem, then run `swarm start` again to repair it.
+```
+
+It does not pretend to have succeeded, and it does not roll back healthy
+components. Fix the cause and re-run.
+
+`swarm start` exits when startup finishes — the daemon keeps running in its own
+session, so you can close the terminal.
+
+#### `swarm status`
+
+```
+Swarm
+
+Repository
+  /home/you/my-project
+
+Handoff daemon
+  running (pid 213348)
+
+ROLE         WORKTREE   SESSION    AGENT      WORK       TASK
+specifier    running    running    running    waiting    -
+coder        running    running    running    working    RATE-1
+refactorer   running    running    running    waiting    -
+architect    running    running    running    waiting    -
+
+HANDOFFS
+  inbox      0
+  current    1
+  outbox     0
+  completed  3
+  failed     0
+  rejected   0
+
+STATUS
+  healthy
+```
+
+`status` is **strictly read-only**: it starts nothing, repairs nothing, and
+does not even create a directory. Every column is observed live — tmux is asked
+about sessions, the OS about the daemon, the filesystem about work — so it
+tells you what is true now, not what was true at startup.
+
+Health is one of `stopped`, `healthy`, `degraded` or `failed`. `degraded` means
+partially up and usually fixable with another `swarm start`.
+
+`--json` gives the same information as typed JSON for scripts and CI:
+
+```json
+{
+  "repository": "/home/you/my-project",
+  "health": "healthy",
+  "daemon": { "status": "running", "pid": 213348, "log": "…/handoffd.log" },
+  "roles": [
+    { "name": "coder", "worktree": "running", "session": "running",
+      "agent": "running", "work": "working", "task": "RATE-1" }
+  ],
+  "handoffs": { "inbox": 0, "current": 1, "outbox": 0,
+                "completed": 3, "failed": 0, "rejected": 0 },
+  "started_at": "2026-08-13T21:08:31Z"
+}
+```
+
+It is generated from typed Go structs, never by parsing the table above.
+
+#### `swarm stop`
+
+```
+✓ agent:coder            stopped
+✓ session:coder          stopped
+✓ daemon                 stopped
+
+Swarm stopped.
+
+Worktrees, branches and handoffs were preserved.
+```
+
+The reverse of startup: **agents → sessions → daemon**. Agents are interrupted
+politely while their session still exists; the daemon goes last so a parting
+handoff still gets delivered.
+
+**`stop` is not cleanup.** It never deletes worktrees, branches, or any handoff
+box — `inbox`, `outbox`, `sent`, `failed`, `rejected`, `current`, `completed`
+all survive. Work in progress is still `current/` afterwards, so `swarm start`
+resumes it. Running `stop` twice is harmless.
+
+To reclaim resources, that is a separate, explicit command:
+
+```bash
+swarm worktrees remove
+```
+
+#### Exit codes
+
+| Command | 0 | non-zero |
+|---|---|---|
+| `swarm start` | everything up | preflight failed, or startup incomplete |
+| `swarm stop` | everything stopped | a component did not stop cleanly |
+| `swarm status` | always (it is an observation) | — |
+| `swarm status --strict` | health is `healthy` | any other health |
+
+Use `--strict` in CI when an unhealthy swarm should fail the job.
 
 ### Worktrees
 
@@ -875,13 +1024,8 @@ cd ~/projects/my-app
 go run ./cmd/swarm doctor
 go build -o ./bin/swarm ./cmd/swarm
 
-# stand everything up
-./bin/swarm worktrees create
-./bin/swarm sessions create
-./bin/swarm agents start
-
-# leave the daemon running in another terminal
-./bin/swarm handoff daemon
+# stand everything up — worktrees, daemon, sessions, agents
+./bin/swarm start
 
 # hand the requirement to the specifier and let the swarm run
 ./bin/swarm handoff send --from architect --to specifier \
@@ -928,14 +1072,19 @@ a later milestone.
 ## Cleaning up
 
 ```bash
-# Ctrl-C the handoff daemon first
-go run ./cmd/swarm agents stop        # 1. stop the agents
-go run ./cmd/swarm sessions remove    # 2. close the tmux sessions
-go run ./cmd/swarm worktrees remove   # 3. remove the worktrees
+./bin/swarm stop               # 1. stop agents, sessions and the daemon
+./bin/swarm worktrees remove   # 2. reclaim the worktrees (optional)
 ```
 
-Undelivered and archived handoffs survive under `.swarm/handoffs/`; delete that
-directory if you want a clean slate.
+Step 1 preserves everything durable. Step 2 is the explicit opt-in to throwing
+worktrees away; branches survive even then, because that is where the work is:
+
+```bash
+git branch -D swarm/specifier swarm/coder swarm/refactorer swarm/architect
+```
+
+Undelivered, completed and archived handoffs survive under `.swarm/handoffs/`;
+delete that directory if you want a genuinely clean slate.
 
 Branches remain after step 3 — that is where the work is. Once you've merged or
 abandoned it:
@@ -1005,6 +1154,27 @@ That is deliberate — work in `current/` is yours until `swarm handoff done
 **`done` prints `NO_CURRENT_WORK`**
 Nothing was accepted. Run `swarm handoff ready <role>` first.
 
+**`swarm start` says startup is incomplete**
+Read the `✗` line: it names the component and the real error. Whatever came up
+is still running, so fix the cause and run `swarm start` again — it repairs
+rather than restarting from scratch.
+
+**`another swarm lifecycle operation is running for this repository`**
+A `start` or `stop` is in progress in another terminal. Wait for it, then retry.
+
+**`handoff daemon already running for this repository`**
+`swarm start` already started one in the background. `swarm status` shows its
+pid; `swarm logs daemon` shows what it is doing.
+
+**`a handoff daemon holds …lock but its identity could not be verified`**
+Something owns the daemon lock that swarm did not record — usually a daemon
+started from a different checkout path. Find it (`swarm logs daemon`, `ps`) and
+stop it yourself; swarm will not signal a process it cannot verify.
+
+**Status shows `degraded`**
+One or more components are down. The table names which. `swarm start` restores
+just the missing ones.
+
 **`swarm is running from a temporary build …`**
 `agents start` was run under `go run`, whose binary disappears when the command
 exits. Build one agents can keep calling: `go build -o ./bin/swarm ./cmd/swarm`,
@@ -1044,7 +1214,60 @@ internal/prompt   loads and assembles instructions
 internal/agent    launches/stops agents; backend adapters
 internal/handoff  message model, parser, validation, durable store,
                   priority selector, ready/done lifecycle, delivery daemon
+internal/lifecycle  composes all of the above into start/status/stop
 cmd/swarm         CLI wiring and output
+```
+
+The dependency direction is one-way: the CLI calls the lifecycle, and the
+lifecycle calls the components through small interfaces (`WorktreeService`,
+`SessionService`, `AgentService`, `WorkService`, `Environment`). It coordinates
+ordering and locking; it never absorbs a component's implementation. That is
+also what lets the whole pipeline be tested with fakes, no tmux or AI backend
+required.
+
+### Locking and process ownership
+
+Two things must never happen twice: a handoff daemon, and a lifecycle
+operation. Both use `flock(2)`, not the existence of a file:
+
+- **`handoffd.lock`** is held by the daemon process for its entire life. Trying
+  to start a second one fails with *"handoff daemon already running for this
+  repository"*.
+- **`lifecycle.lock`** is held for the duration of `start` or `stop`, so two
+  terminals cannot drive one swarm at once.
+
+The kernel releases an flock the moment its holder dies, however it dies — so a
+crash leaves no stuck lock, and a leftover lock *file* is meaningless on its
+own. That is what makes stale state recoverable without a manual cleanup step.
+
+Killing the daemon is equally careful. A pid alone is never trusted: pids get
+recycled, and a stale file may name someone else's process. The daemon is only
+signalled when three facts agree — the lock is held, the recorded identity names
+*this* repository, and the pid is alive. Anything less is reported as `stopped`
+(stale, cleaned up) or `failed` (needs a human), and **an unverified pid is
+never signalled**. `stop` sends `SIGTERM`, waits, and escalates to `SIGKILL`
+only against that verified pid.
+
+`state.json` records when the swarm was last started. It is metadata, never
+truth: whether a session or process is alive is always answered by asking tmux
+or the operating system.
+
+### Running several projects at once
+
+Everything that identifies a swarm is derived from the repository root, so two
+projects never collide:
+
+| Per repository | Derived from |
+|---|---|
+| worktrees | `<repo>/.swarm/worktrees` |
+| tmux socket | `sha256(repo root)[:12]` |
+| daemon lock, pid, logs | `<repo>/.swarm/runtime` |
+| handoffs | `<repo>/.swarm/handoffs` |
+
+```bash
+cd ~/project-a && ./bin/swarm start
+cd ~/project-b && ./bin/swarm start   # its own daemon, sessions, worktrees
+cd ~/project-a && ./bin/swarm stop    # project B keeps running
 ```
 
 Inside `internal/handoff` the split is deliberate: `store.go` owns the
@@ -1118,11 +1341,19 @@ no test launches a real agent.
   program you leave running in a managed session also reads as `running`.
 - **`agents stop` sends a single Ctrl-C.** If the agent ignores it or asks for
   confirmation, it may survive; check with `agents list`.
-- **Handoff delivery needs the daemon running.** Nothing moves while it is
-  stopped; messages simply wait in the outbox.
-- **The daemon polls every 250 ms** rather than watching the filesystem, and
-  assumes it is the only daemon for a repository. Delivery is idempotent, but
-  there is no lockfile, so two daemons would race on the source file.
+- **Unix only.** Locking (`flock`), process groups and signals are POSIX;
+  there is no Windows implementation.
+- **Handoff delivery needs the daemon running.** `swarm start` keeps one alive;
+  while it is stopped, messages simply wait in the outbox.
+- **The daemon polls every 250 ms** rather than watching the filesystem. Only
+  one can run per repository, enforced by a real lock.
+- **No `swarm clean` yet.** `swarm worktrees remove` is the manual path.
+- **`swarm logs` covers the daemon only.** Agents are interactive TUIs in tmux,
+  so their output lives in pane scrollback — use `sessions attach`.
+- **`stop` does not drain in-flight handoffs** before stopping the daemon;
+  anything left in an outbox is delivered on the next start.
+- **Health is coarse** (`stopped`/`healthy`/`degraded`/`failed`) with no
+  per-component reason in the JSON.
 - **Handoffs carry Git identity, not code.** The commit is verified and passed
   on; no automatic merge, cherry-pick, task state machine, or workflow
   advancement.
