@@ -180,3 +180,27 @@ func TestResolveCommitIsRepositoryScoped(t *testing.T) {
 		t.Errorf("own commit failed to resolve: %v", err)
 	}
 }
+
+// An agent runs inside a linked worktree, but every managed resource belongs to
+// the main working tree — so RepoRoot must look through the worktree.
+func TestRepoRootFromLinkedWorktree(t *testing.T) {
+	root, _, _ := testRepo(t)
+
+	m, err := NewManager(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wt, created, err := m.Create("coder", "wt-coder")
+	if err != nil || !created {
+		t.Fatalf("Create = (%v, %v)", created, err)
+	}
+
+	got, err := RepoRoot(wt.AbsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolve(got) != resolve(root) {
+		t.Errorf("RepoRoot(%s) = %s, want the main working tree %s", wt.AbsPath, got, root)
+	}
+}

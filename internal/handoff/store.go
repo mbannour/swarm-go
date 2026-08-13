@@ -488,6 +488,40 @@ func (s *Store) ClearBatchID(role string) error {
 	return nil
 }
 
+// Submit places externally supplied work directly into a role's inbox.
+//
+// This is the developer boundary: the sender is the reserved system identity
+// rather than a role, so there is no outbox to scan and the daemon is not
+// involved. Everything downstream of this point is ordinary role-to-role flow.
+func (s *Store) Submit(h Handoff, to string) (Entry, error) {
+	id, err := NewID()
+	if err != nil {
+		return Entry{}, err
+	}
+
+	h.ID = id
+	h.From = SystemSender
+	h.To = []string{to}
+	h.CreatedAt = s.Now().UTC()
+	h.CanonicalCommit = ""
+
+	if err := Validate(h, s.Roles, ""); err != nil {
+		return Entry{}, err
+	}
+
+	path, already, err := s.Deliver(h, to)
+	if err != nil {
+		return Entry{}, err
+	}
+	if already {
+		return Entry{}, fmt.Errorf("a task with id %s was already delivered", h.ID)
+	}
+
+	h.DeliveredAt = s.Now().UTC()
+
+	return Entry{Handoff: h, Name: filepath.Base(path), Path: path}, nil
+}
+
 // FindBySource returns the messages a role has already produced from one piece
 // of current work, looking in outbox/ (queued) and sent/ (delivered).
 //

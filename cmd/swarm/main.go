@@ -26,6 +26,9 @@ func main() {
 	case "logs":
 		runLogs(os.Args[2:])
 
+	case "task":
+		runTask(os.Args[2:])
+
 	case "config":
 		printConfig()
 
@@ -100,6 +103,8 @@ func printUsage() {
   swarm status [--json]       read-only overview
   swarm stop                  stop processes, keep durable state
   swarm logs daemon
+  swarm task submit --id <id> --description <text>
+  swarm task trace <id>
 
   swarm version
   swarm roles

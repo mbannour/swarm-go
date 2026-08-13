@@ -20,7 +20,7 @@ type Backend interface {
 	// Command returns the shell command line to type into the role's pane.
 	// promptPath is a file containing the assembled prompt; workdir is the
 	// role's worktree. Implementations must quote every interpolated value.
-	Command(promptPath, workdir string) string
+	Command(role, promptPath, workdir string) string
 }
 
 // Lookup resolves a backend name from swarm.conf.
@@ -28,6 +28,8 @@ func Lookup(name string) (Backend, error) {
 	switch name {
 	case "codex":
 		return Codex{}, nil
+	case "fake":
+		return Fake{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported backend %q", name)
 	}
@@ -50,9 +52,33 @@ type Codex struct{}
 func (Codex) Name() string       { return "codex" }
 func (Codex) Executable() string { return "codex" }
 
-func (Codex) Command(promptPath, workdir string) string {
+func (Codex) Command(role, promptPath, workdir string) string {
 	return fmt.Sprintf(
 		"codex --cd %s \"$(cat %s)\"",
+		shellQuote(workdir),
+		shellQuote(promptPath),
+	)
+}
+
+// Fake is a deterministic stand-in used by the acceptance tests. It drives the
+// same runtime protocol as a real agent — ready, work, commit, next, done —
+// through the same tmux and handoff paths, so the orchestrator is exercised
+// without any AI service.
+//
+// The executable is expected on PATH; the acceptance harness supplies it.
+type Fake struct{}
+
+func (Fake) Name() string       { return "fake" }
+func (Fake) Executable() string { return FakeAgentExecutable }
+
+// FakeAgentExecutable is the program a `fake` backend launches.
+const FakeAgentExecutable = "swarm-fake-agent"
+
+func (Fake) Command(role, promptPath, workdir string) string {
+	return fmt.Sprintf(
+		"%s %s %s %s",
+		FakeAgentExecutable,
+		shellQuote(role),
 		shellQuote(workdir),
 		shellQuote(promptPath),
 	)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -35,12 +36,44 @@ func Available() bool {
 	return err == nil
 }
 
-// RepoRoot returns the top level of the git repository containing dir.
+// RepoRoot returns the top level of the main working tree of the repository
+// containing dir.
+//
+// The subtlety: agents run inside linked worktrees, and `rev-parse
+// --show-toplevel` would answer with the *worktree* there. Every managed
+// resource — .swarm/handoffs, .swarm/runtime, the tmux socket — belongs to the
+// main working tree, so a role running `swarm handoff ready` from
+// .swarm/worktrees/wt-coder must still resolve to the project itself.
+// --git-common-dir points at the shared .git directory from anywhere, so its
+// parent is the main working tree.
 func RepoRoot(dir string) (string, error) {
-	root, err := run(dir, "rev-parse", "--show-toplevel")
+	common, err := run(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
-		return "", fmt.Errorf("not inside a git repository: %w", err)
+		// Older Git without --path-format: fall back to resolving by hand.
+		common, err = run(dir, "rev-parse", "--git-common-dir")
+		if err != nil {
+			return "", fmt.Errorf("not inside a git repository: %w", err)
+		}
+		if !filepath.IsAbs(common) {
+			abs, absErr := filepath.Abs(filepath.Join(dir, common))
+			if absErr != nil {
+				return "", absErr
+			}
+			common = abs
+		}
 	}
+
+	root := filepath.Dir(filepath.Clean(common))
+
+	// A bare repository has no working tree to manage.
+	if filepath.Base(common) != ".git" {
+		top, topErr := run(dir, "rev-parse", "--show-toplevel")
+		if topErr != nil {
+			return "", fmt.Errorf("not inside a git repository: %w", topErr)
+		}
+		return top, nil
+	}
+
 	return root, nil
 }
 

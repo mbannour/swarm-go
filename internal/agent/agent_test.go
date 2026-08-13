@@ -28,7 +28,7 @@ func TestLookupUnknownBackend(t *testing.T) {
 }
 
 func TestCodexCommand(t *testing.T) {
-	got := Codex{}.Command("/repo/.swarm/runtime/prompts/coder.prompt", "/repo/.swarm/worktrees/wt-coder")
+	got := Codex{}.Command("coder", "/repo/.swarm/runtime/prompts/coder.prompt", "/repo/.swarm/worktrees/wt-coder")
 
 	want := `codex --cd '/repo/.swarm/worktrees/wt-coder' "$(cat '/repo/.swarm/runtime/prompts/coder.prompt')"`
 	if got != want {

@@ -20,6 +20,7 @@ Clojure, no shell orchestration: one static binary and the standard library.
 - [Configuration: `swarm.conf`](#configuration-swarmconf)
 - [Prompts](#prompts)
 - [Command reference](#command-reference)
+  - [Submitting work: `task`](#submitting-work-task)
   - [Lifecycle: `start`, `status`, `stop`](#lifecycle-start-status-stop)
   - [Handoffs](#handoffs)
   - [Routing work onward: `next`](#routing-work-onward-next)
@@ -138,8 +139,8 @@ go build -o ./bin/swarm ./cmd/swarm
 ./bin/swarm start
 
 # 2. give the swarm something to do
-./bin/swarm handoff send --from architect --to specifier \
-  --type note --priority 20 --note "Add rate limiting to the login endpoint"
+./bin/swarm task submit --id RATE-1 \
+  --description "Add rate limiting to the login endpoint: 5 req/min per account"
 
 # 3. watch it flow
 ./bin/swarm status
@@ -359,6 +360,58 @@ swarm doctor      # check git, tmux and agent backends
 swarm roles       # list the four-pack role names
 swarm config      # parse and print swarm.conf
 ```
+
+### Submitting work: `task`
+
+`task submit` is how work enters the swarm from outside it — you, a script, a
+ticket system:
+
+```bash
+swarm task submit --id RATE-1 \
+  --description "Add rate limiting to the login endpoint" \
+  --priority 20
+```
+
+```
+TASK_SUBMITTED: RATE-1
+DESTINATION: specifier
+ID: a4174c47932e7a8015e143caa0e2358c
+FILE: …/.swarm/handoffs/specifier/inbox/…-system-to-specifier.handoff
+```
+
+The submitter is deliberately **not** a role. It appears as the reserved
+`system` sender, which owns no worktree, no session and no outbox, and can never
+be a destination — so this does not weaken the rule that only configured roles
+exchange handoffs. It lands directly in the entry role's inbox, so no daemon
+pass is needed to get started.
+
+To follow a task afterwards:
+
+```bash
+swarm task trace RATE-1
+```
+
+```
+TASK RATE-1
+
+developer -> specifier
+  ID: a4174c47…
+  TYPE: note
+  STATE: completed
+
+specifier -> coder
+  ID: fcfaebc6…
+  SOURCE_ID: a4174c47…
+  TYPE: git_handoff
+  STATE: completed
+  COMMIT: 67e383af0c951f4736ef18ad6d60fcc787786ba6
+…
+EVENTS: 5
+```
+
+The trace is derived from the handoff files themselves — ids, source ids,
+timestamps and commits are already recorded, so there is no database and nothing
+extra to keep in sync.
 
 ### Lifecycle: `start`, `status`, `stop`
 
@@ -1028,9 +1081,8 @@ go build -o ./bin/swarm ./cmd/swarm
 ./bin/swarm start
 
 # hand the requirement to the specifier and let the swarm run
-./bin/swarm handoff send --from architect --to specifier \
-  --type note --priority 20 \
-  --note "Add rate limiting to the login endpoint: 5 req/min per account"
+./bin/swarm task submit --id RATE-1 --priority 20 \
+  --description "Add rate limiting to the login endpoint: 5 req/min per account"
 
 ./bin/swarm status
 ```
@@ -1059,6 +1111,7 @@ You can run any of those commands yourself to watch, nudge, or take over:
 ./bin/swarm handoff current coder     # what is the coder working on?
 ./bin/swarm handoff status coder      # has it handed off yet?
 ./bin/swarm status                    # the whole picture
+./bin/swarm task trace RATE-1         # the task's whole journey
 
 # take the finished work back to your branch
 git merge swarm/coder
@@ -1323,7 +1376,8 @@ project's socket; all interpolated paths are shell-quoted.
 
 ```bash
 go build ./...
-go test ./...
+go test ./...                 # everything except the tmux-level acceptance run
+./scripts/e2e-fourpack.sh     # the full CLI cycle; needs tmux
 go vet ./...
 gofmt -l ./cmd ./internal
 ```
@@ -1331,7 +1385,56 @@ gofmt -l ./cmd ./internal
 Tests never touch your real repository or your default tmux server: the Git
 tests build a throwaway repo in `t.TempDir()`, and the tmux tests use their own
 socket and kill it afterwards. Both skip cleanly when the tool is missing, and
-no test launches a real agent.
+**no test ever calls a paid AI service**.
+
+### The acceptance suite
+
+`internal/e2e` drives one complete requirement — a discount calculator — through
+the whole cycle:
+
+```
+developer → specifier → coder → refactorer → architect → specifier
+```
+
+with a real Git repository, real commits, the real handoff store, the real
+daemon and the real ready/next/done lifecycle. Only the *intelligence* is faked:
+each role's work is a fixed function rather than a model call. It needs no tmux,
+so it runs everywhere `go test` runs and is never silently skipped.
+
+It asserts, at each hop: the message arrived, the commit resolves canonically,
+worktrees stayed isolated on their own branches, nothing was rejected or failed,
+no current work is stuck, no handoff id is duplicated, and the implementation
+actually landed. It also covers a restart during active work and a crash between
+`handoff next` and `handoff done`.
+
+`./scripts/e2e-fourpack.sh` does the same at the CLI level with **real tmux
+sessions, a real background daemon and a real `swarm start`**, using a fake
+agent binary (`scripts/fake-agent.sh`) that drives the same commands the runtime
+prompt gives a real agent. It restarts the swarm mid-flight and prints the Git
+graph and trace at the end:
+
+```
+FOUR-PACK E2E PASSED
+
+Task: DEMO-1
+Cycle:
+specifier -> coder -> refactorer -> architect -> specifier
+
+Restart recovery:     PASS
+Duplicate prevention: PASS
+Worktree isolation:   PASS
+Git handoffs:         PASS
+Checks:               19 passed, 0 failed
+```
+
+On failure it dumps `swarm status`, every queue, failure reasons, the daemon
+log, tmux state, the Git graph and the trace before exiting non-zero.
+
+### What is actually proven
+
+[`docs/four-pack-parity.md`](docs/four-pack-parity.md) tracks parity with the
+original workflow feature by feature. A box is ticked only when a named test
+proves it; everything else is listed as a gap, however finished the code looks.
 
 ## Current limitations
 
@@ -1355,8 +1458,12 @@ no test launches a real agent.
 - **Health is coarse** (`stopped`/`healthy`/`degraded`/`failed`) with no
   per-component reason in the JSON.
 - **Handoffs carry Git identity, not code.** The commit is verified and passed
-  on; no automatic merge, cherry-pick, task state machine, or workflow
-  advancement.
+  on, but each role's worktree stays on its own branch — the receiver does
+  **not** get the sender's files until someone merges or cherry-picks. The
+  acceptance run shows this plainly as four sibling branches. Automatic
+  materialisation is the next milestone.
+- **Real-agent behavior is unproven.** Every test uses deterministic fake
+  agents, which proves the orchestrator, not that Codex follows the protocol.
 - **A multi-destination message has one shared fate for its source file** —
   all-delivered goes to `sent/`, anything else to `failed/` with the partial
   outcome recorded. Successful copies are never rolled back, but there is no

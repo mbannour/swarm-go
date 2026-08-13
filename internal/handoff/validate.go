@@ -7,6 +7,12 @@ import (
 	"github.com/mbannour/swarm-go/internal/git"
 )
 
+// SystemSender is the reserved sender used for work entering the swarm from
+// outside it — a developer submitting a task. It is deliberately not a role: it
+// owns no worktree, no session and no outbox, and it may only ever appear as a
+// sender, never as a destination.
+const SystemSender = "system"
+
 // Roles is the set of configured role names. Role names are only ever taken
 // from configuration — never from a handoff file — so a message can never name
 // a path component the operator did not configure.
@@ -45,7 +51,13 @@ func Validate(h Handoff, roles Roles, owner string) error {
 	if h.From == "" {
 		return fmt.Errorf("missing sender")
 	}
-	if !roles.Has(h.From) {
+	// The system sender is the external developer boundary. It never owns an
+	// outbox, so it is only valid when the message did not come from one.
+	if h.From == SystemSender {
+		if owner != "" {
+			return fmt.Errorf("%q may not send from a role outbox", SystemSender)
+		}
+	} else if !roles.Has(h.From) {
 		return fmt.Errorf("sender role %q is not configured", h.From)
 	}
 
@@ -55,6 +67,9 @@ func Validate(h Handoff, roles Roles, owner string) error {
 
 	seen := map[string]bool{}
 	for _, to := range h.To {
+		if to == SystemSender {
+			return fmt.Errorf("%q cannot receive handoffs", SystemSender)
+		}
 		if !roles.Has(to) {
 			return fmt.Errorf("destination role %q is not configured", to)
 		}

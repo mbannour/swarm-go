@@ -136,7 +136,7 @@ func (m *Manager) Start(r Role, assembled string) (started bool, err error) {
 	}
 
 	session := tmux.SessionName(r.Name)
-	line := backend.Command(promptPath, r.Worktree)
+	line := backend.Command(r.Name, promptPath, r.Worktree)
 
 	// The command line and the Enter key are sent as separate tmux arguments;
 	// the prompt text itself stays in the file.
