@@ -3,6 +3,8 @@ package handoff
 import (
 	"fmt"
 	"strings"
+
+	"github.com/mbannour/swarm-go/internal/git"
 )
 
 // Roles is the set of configured role names. Role names are only ever taken
@@ -24,6 +26,11 @@ func (r Roles) Has(name string) bool { return r[name] }
 
 // Validate checks a parsed handoff against the configured roles.
 //
+// This is the "is the message itself well formed" check: everything it rejects
+// is a permanent fault of the message, and the daemon quarantines such files
+// under rejected/. Whether the commit actually exists is a separate question,
+// answered by ResolveCommit — see daemon.go.
+//
 // owner is the role whose outbox the file was found in; pass "" when the
 // message did not come from an outbox (for example, `handoff send`).
 func Validate(h Handoff, roles Roles, owner string) error {
@@ -42,14 +49,22 @@ func Validate(h Handoff, roles Roles, owner string) error {
 		return fmt.Errorf("sender role %q is not configured", h.From)
 	}
 
-	if h.To == "" {
+	if len(h.To) == 0 {
 		return fmt.Errorf("missing destination")
 	}
-	if !roles.Has(h.To) {
-		return fmt.Errorf("destination role %q is not configured", h.To)
-	}
-	if h.To == h.From {
-		return fmt.Errorf("role %q cannot hand off to itself", h.From)
+
+	seen := map[string]bool{}
+	for _, to := range h.To {
+		if !roles.Has(to) {
+			return fmt.Errorf("destination role %q is not configured", to)
+		}
+		if to == h.From {
+			return fmt.Errorf("role %q cannot hand off to itself", h.From)
+		}
+		if seen[to] {
+			return fmt.Errorf("destination role %q is listed twice", to)
+		}
+		seen[to] = true
 	}
 
 	if owner != "" && h.From != owner {
@@ -68,15 +83,17 @@ func Validate(h Handoff, roles Roles, owner string) error {
 		if h.Task == "" {
 			return fmt.Errorf("git_handoff requires a task")
 		}
-		if err := checkInline("task", h.Task); err != nil {
-			return err
-		}
 		if h.Commit == "" {
 			return fmt.Errorf("git_handoff requires a commit")
 		}
-		if err := checkCommit(h.Commit); err != nil {
+		// Shape only. Existence is checked against the repository later.
+		if err := git.ValidAbbrev(h.Commit); err != nil {
 			return err
 		}
+	} else if h.Commit != "" || h.Task != "" {
+		// Notes carry no Git identity; silently ignoring the fields would
+		// hide a mistake in the sender.
+		return fmt.Errorf("%s must not carry task or commit fields", TypeNote)
 	}
 
 	if h.Task != "" {
@@ -101,22 +118,6 @@ func checkInline(field, value string) error {
 	}
 	if len(value) > 200 {
 		return fmt.Errorf("%s is longer than 200 characters", field)
-	}
-	return nil
-}
-
-// checkCommit requires something that looks like a Git object name. Handoff
-// values are never passed to a shell, but keeping this strict makes a
-// malformed message obvious at delivery time rather than later.
-func checkCommit(commit string) error {
-	if len(commit) < 4 || len(commit) > 64 {
-		return fmt.Errorf("commit %q must be 4..64 characters", commit)
-	}
-	for _, r := range commit {
-		isHex := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
-		if !isHex {
-			return fmt.Errorf("commit %q is not a hexadecimal object name", commit)
-		}
 	}
 	return nil
 }

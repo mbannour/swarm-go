@@ -101,7 +101,8 @@ func printUsage() {
   swarm handoff send --from <role> --to <role> --type <type> --note <text> [...]
   swarm handoff inbox <role>
   swarm handoff outbox <role>
-  swarm handoff ack <role> <file>
+  swarm handoff ready <role>
+  swarm handoff done <role>
   swarm handoff daemon`)
 }
 

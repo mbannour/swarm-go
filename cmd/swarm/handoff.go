@@ -6,16 +6,18 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/mbannour/swarm-go/internal/config"
+	"github.com/mbannour/swarm-go/internal/git"
 	"github.com/mbannour/swarm-go/internal/handoff"
 	"github.com/mbannour/swarm-go/internal/tmux"
 )
 
 func runHandoff(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: swarm handoff <send|inbox|outbox|ack|daemon>")
+		fmt.Println("usage: swarm handoff <send|inbox|outbox|ready|done|ack|daemon>")
 		os.Exit(1)
 	}
 
@@ -27,13 +29,19 @@ func runHandoff(args []string) {
 		fail(err)
 	}
 
+	life := handoff.NewLifecycle(store, receiveModeLookup(cfg))
+
 	switch args[0] {
 	case "send":
 		fail(handoffSend(store, args[1:]))
 	case "inbox":
-		fail(handoffBox(store, args[1:], true))
+		fail(handoffBox(store, handoff.BoxInbox, args[1:]))
 	case "outbox":
-		fail(handoffBox(store, args[1:], false))
+		fail(handoffBox(store, handoff.BoxOutbox, args[1:]))
+	case "ready":
+		fail(handoffReady(life, args[1:]))
+	case "done":
+		fail(handoffDone(life, args[1:]))
 	case "ack":
 		fail(handoffAck(store, args[1:]))
 	case "daemon":
@@ -53,15 +61,28 @@ func configuredRoles(cfg *config.Config) []string {
 	return names
 }
 
+// receiveModeLookup resolves a role's receive mode from swarm.conf. Receiver
+// behavior is configuration, never hardcoded per role.
+func receiveModeLookup(cfg *config.Config) func(string) (handoff.ReceiveMode, error) {
+	return func(role string) (handoff.ReceiveMode, error) {
+		for _, r := range cfg.Roles {
+			if r.Name == role {
+				return handoff.ReceiveMode(r.ReceiveMode), nil
+			}
+		}
+		return "", fmt.Errorf("unknown role %q", role)
+	}
+}
+
 func handoffSend(store *handoff.Store, args []string) error {
 	fs := flag.NewFlagSet("handoff send", flag.ContinueOnError)
 
 	var (
 		from     = fs.String("from", "", "sending role")
-		to       = fs.String("to", "", "destination role")
+		to       = fs.String("to", "", "destination role, or several separated by commas")
 		typ      = fs.String("type", string(handoff.TypeNote), "git_handoff or note")
 		task     = fs.String("task", "", "task identifier (required for git_handoff)")
-		commit   = fs.String("commit", "", "commit object name (required for git_handoff)")
+		commit   = fs.String("commit", "", "10-character commit abbreviation (required for git_handoff)")
 		priority = fs.Int("priority", 10, "0..100, higher is more urgent")
 		note     = fs.String("note", "", "human-readable message")
 	)
@@ -70,52 +91,45 @@ func handoffSend(store *handoff.Store, args []string) error {
 		return err
 	}
 
-	h := handoff.Handoff{
+	var destinations []string
+	for _, part := range strings.Split(*to, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			destinations = append(destinations, part)
+		}
+	}
+
+	entry, err := store.Send(handoff.Handoff{
 		Type:     handoff.Type(*typ),
 		From:     *from,
-		To:       *to,
+		To:       destinations,
 		Task:     *task,
 		Commit:   *commit,
 		Priority: *priority,
 		Note:     *note,
-	}
-
-	path, err := store.Send(h)
+	})
 	if err != nil {
 		return fmt.Errorf("send handoff: %w", err)
 	}
 
-	fmt.Printf("✓ queued %s -> %s in %s outbox\n", h.From, h.To, h.From)
-	fmt.Printf("  %s\n", path)
+	fmt.Printf("✓ queued %s -> %s\n", entry.From, strings.Join(entry.To, ","))
+	fmt.Printf("  id   %s\n", entry.ID)
+	fmt.Printf("  file %s\n", entry.Path)
 
 	return nil
 }
 
-func handoffBox(store *handoff.Store, args []string, inbox bool) error {
-	label := "OUTBOX"
-	if inbox {
-		label = "INBOX"
-	}
-
+func handoffBox(store *handoff.Store, box string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: swarm handoff %s <role>", lower(label))
+		return fmt.Errorf("usage: swarm handoff %s <role>", box)
 	}
 	role := args[0]
 
-	var (
-		entries []handoff.Entry
-		err     error
-	)
-	if inbox {
-		entries, err = store.Inbox(role)
-	} else {
-		entries, err = store.Outbox(role)
-	}
+	entries, err := store.List(role, box)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("%s: %s\n\n", label, role)
+	fmt.Printf("%s: %s\n\n", strings.ToUpper(box), role)
 
 	if len(entries) == 0 {
 		fmt.Println("(empty)")
@@ -123,15 +137,15 @@ func handoffBox(store *handoff.Store, args []string, inbox bool) error {
 	}
 
 	peer := "FROM"
-	if !inbox {
+	if box == handoff.BoxOutbox {
 		peer = "TO"
 	}
 	fmt.Printf("%-9s %-11s %-13s %-10s %s\n", "PRIORITY", peer, "TYPE", "TASK", "FILE")
 
 	for _, e := range entries {
 		other := e.From
-		if !inbox {
-			other = e.To
+		if box == handoff.BoxOutbox {
+			other = strings.Join(e.To, ",")
 		}
 		fmt.Printf("%-9d %-11s %-13s %-10s %s\n", e.Priority, other, e.Type, dash(e.Task), e.Name)
 	}
@@ -139,10 +153,114 @@ func handoffBox(store *handoff.Store, args []string, inbox bool) error {
 	return nil
 }
 
+// handoffReady prints machine-readable lines: agents parse this.
+func handoffReady(life *handoff.Lifecycle, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: swarm handoff ready <role>")
+	}
+
+	selection, err := life.Ready(args[0])
+	if err != nil {
+		return err
+	}
+
+	printSelection(selection)
+
+	return nil
+}
+
+func handoffDone(life *handoff.Lifecycle, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: swarm handoff done <role>")
+	}
+
+	finished, next, err := life.Done(args[0])
+	if err != nil {
+		return err
+	}
+
+	if len(finished) == 0 {
+		fmt.Println("NO_CURRENT_WORK")
+	}
+	for _, e := range finished {
+		if e.Task != "" {
+			fmt.Printf("DONE: %s\n", e.Task)
+		} else {
+			fmt.Printf("DONE: %s\n", e.ID)
+		}
+	}
+
+	printSelection(next)
+
+	return nil
+}
+
+// printSelection renders a selection as stable key: value lines.
+func printSelection(s handoff.Selection) {
+	if s.Empty() {
+		fmt.Println("NO_TASK")
+		return
+	}
+
+	if s.Mode == handoff.ModeBatch {
+		fmt.Printf("BATCH: %s\n", batchLabel(s))
+		fmt.Printf("PRIORITY: %d\n", s.Priority)
+		for _, e := range s.Entries {
+			fmt.Printf("BATCH_ITEM: %s\n", e.Path)
+		}
+		fmt.Println()
+		for _, e := range s.Entries {
+			printEntry(e)
+			fmt.Println()
+		}
+		return
+	}
+
+	printEntry(s.Entries[0])
+}
+
+// batchLabel identifies the active batch by its first item's id.
+func batchLabel(s handoff.Selection) string {
+	if len(s.Entries) == 0 {
+		return ""
+	}
+	return s.Entries[0].ID
+}
+
+func printEntry(e handoff.Entry) {
+	fmt.Printf("TASK: %s\n", e.Path)
+	fmt.Printf("ID: %s\n", e.ID)
+	fmt.Printf("TYPE: %s\n", e.Type)
+	fmt.Printf("FROM: %s\n", e.From)
+	fmt.Printf("PRIORITY: %d\n", e.Priority)
+
+	if e.Task != "" {
+		fmt.Printf("TASK_NAME: %s\n", e.Task)
+	}
+	if e.Commit != "" {
+		fmt.Printf("COMMIT: %s\n", e.Commit)
+	}
+	if e.CanonicalCommit != "" {
+		fmt.Printf("CANONICAL_COMMIT: %s\n", e.CanonicalCommit)
+	}
+	if !e.CreatedAt.IsZero() {
+		fmt.Printf("CREATED_AT: %s\n", e.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
+	}
+	if !e.DeliveredAt.IsZero() {
+		fmt.Printf("DELIVERED_AT: %s\n", e.DeliveredAt.Format("2006-01-02T15:04:05Z07:00"))
+	}
+	if e.Note != "" {
+		fmt.Printf("MESSAGE: %s\n", e.Note)
+	}
+}
+
+// handoffAck is the Step 6 lifecycle, kept for compatibility.
 func handoffAck(store *handoff.Store, args []string) error {
 	if len(args) < 2 {
 		return fmt.Errorf("usage: swarm handoff ack <role> <filename>")
 	}
+
+	fmt.Fprintln(os.Stderr, "warning: `handoff ack` is deprecated; use `handoff ready` and `handoff done`")
 
 	dst, err := store.Ack(args[0], args[1])
 	if err != nil {
@@ -168,7 +286,9 @@ func handoffDaemon(store *handoff.Store, roles []string, repoRoot string, args [
 		notifier = tmuxNotifier{tmux.NewManager(repoRoot)}
 	}
 
-	d := handoff.NewDaemon(store, roles, notifier)
+	// Commits resolve against the project repository only — never a path
+	// taken from a handoff.
+	d := handoff.NewDaemon(store, roles, notifier, git.NewRepo(repoRoot))
 	d.Interval = *interval
 
 	// Stop cleanly on Ctrl-C or SIGTERM.
@@ -204,14 +324,4 @@ func dash(s string) string {
 		return "-"
 	}
 	return s
-}
-
-func lower(s string) string {
-	out := []rune(s)
-	for i, r := range out {
-		if r >= 'A' && r <= 'Z' {
-			out[i] = r + 32
-		}
-	}
-	return string(out)
 }

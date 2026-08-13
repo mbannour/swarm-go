@@ -6,28 +6,42 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 // DefaultInterval is how often the daemon scans the outboxes.
 const DefaultInterval = 250 * time.Millisecond
 
-// Daemon scans configured outboxes and delivers valid messages to inboxes.
-// One bad file never stops the loop: it is quarantined and the scan continues.
+// deliveryAttempts is how often a transient filesystem failure is retried
+// within one scan. Permanent faults are never retried.
+const deliveryAttempts = 3
+
+// CommitResolver verifies that a commit abbreviation names exactly one commit
+// and returns its canonical SHA. The daemon resolves against the project
+// repository only — never a path taken from a message.
+type CommitResolver interface {
+	ResolveCommit(abbrev string) (string, error)
+}
+
+// Daemon scans configured outboxes and delivers messages to inboxes.
+// One bad file never stops the loop.
 type Daemon struct {
 	Store    *Store
-	Roles    []string // configured role names, in configuration order
-	Notifier Notifier // may be nil: delivery still happens, nobody is woken
+	Roles    []string       // configured role names, in configuration order
+	Notifier Notifier       // may be nil: delivery still happens, nobody is woken
+	Commits  CommitResolver // may be nil: git_handoff commits are then unverifiable
 	Interval time.Duration
 	Log      io.Writer
 }
 
 // NewDaemon returns a daemon with sane defaults.
-func NewDaemon(store *Store, roles []string, n Notifier) *Daemon {
+func NewDaemon(store *Store, roles []string, n Notifier, commits CommitResolver) *Daemon {
 	return &Daemon{
 		Store:    store,
 		Roles:    roles,
 		Notifier: n,
+		Commits:  commits,
 		Interval: DefaultInterval,
 		Log:      os.Stdout,
 	}
@@ -35,8 +49,11 @@ func NewDaemon(store *Store, roles []string, n Notifier) *Daemon {
 
 // ScanResult summarises one pass over every outbox.
 type ScanResult struct {
-	Delivered int
-	Rejected  int
+	Delivered int // destination copies written
+	Duplicate int // destination copies already present
+	Sent      int // logical handoffs fully delivered
+	Rejected  int // invalid messages quarantined
+	Failed    int // valid requests that could not be completed
 }
 
 // Run scans until the context is cancelled.
@@ -71,7 +88,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 func (d *Daemon) Scan() ScanResult {
 	var result ScanResult
 
-	// Roles whose agent should be woken once at the end of the pass.
 	woken := map[string]bool{}
 
 	for _, role := range d.Roles {
@@ -87,31 +103,14 @@ func (d *Daemon) Scan() ScanResult {
 			continue
 		}
 
-		// Unparsable files: quarantine, keep going.
+		// Unparsable files are a fault of the message: quarantine, keep going.
 		for _, name := range bad {
 			d.reject(filepath.Join(dir, name), role, "file is not a valid handoff")
 			result.Rejected++
 		}
 
-		// list() already ordered by priority descending, then timestamp.
 		for _, e := range entries {
-			if err := Validate(e.Handoff, d.Store.Roles, role); err != nil {
-				d.reject(e.Path, role, err.Error())
-				result.Rejected++
-				continue
-			}
-
-			dst, err := d.Store.Deliver(e)
-			if err != nil {
-				d.logf("deliver %s: %v", e.Name, err)
-				continue
-			}
-
-			d.logf("delivered %s -> %s (%s, priority %d)", e.From, e.To, e.Type, e.Priority)
-			_ = dst
-
-			result.Delivered++
-			woken[e.To] = true
+			d.process(role, e, &result, woken)
 		}
 	}
 
@@ -122,25 +121,119 @@ func (d *Daemon) Scan() ScanResult {
 	return result
 }
 
-// reject quarantines a file, logging both outcomes.
+// process handles one logical handoff from a role's outbox.
+func (d *Daemon) process(role string, e Entry, result *ScanResult, woken map[string]bool) {
+	// 1. Is the message itself well formed? A fault here is permanent.
+	if err := Validate(e.Handoff, d.Store.Roles, role); err != nil {
+		d.reject(e.Path, role, err.Error())
+		result.Rejected++
+		return
+	}
+
+	// 2. Does the commit exist? A valid request naming a commit we cannot
+	//    resolve is a failed request, not a malformed message, so it lands in
+	//    the sender's failed/ box where the sender can see and re-send it.
+	h := e.Handoff
+	if h.Type == TypeGit {
+		if d.Commits == nil {
+			d.fail(role, e.Path, "no commit resolver configured; cannot verify git_handoff")
+			result.Failed++
+			return
+		}
+
+		canonical, err := d.Commits.ResolveCommit(h.Commit)
+		if err != nil {
+			d.fail(role, e.Path, err.Error())
+			result.Failed++
+			return
+		}
+		h.CanonicalCommit = canonical
+	}
+
+	// 3. Deliver to each destination independently. One destination failing
+	//    must never undo or block another.
+	var failures []string
+	delivered := 0
+
+	for _, to := range h.To {
+		path, already, err := d.deliver(h, to)
+		switch {
+		case err != nil:
+			failures = append(failures, fmt.Sprintf("%s: %v", to, err))
+			d.logf("deliver %s -> %s failed: %v", h.From, to, err)
+		case already:
+			result.Duplicate++
+			delivered++
+			d.logf("already delivered %s -> %s (id %s)", h.From, to, short(h.ID))
+		default:
+			result.Delivered++
+			delivered++
+			woken[to] = true
+			d.logf("delivered %s -> %s (%s, priority %d, id %s)", h.From, to, h.Type, h.Priority, short(h.ID))
+			_ = path
+		}
+	}
+
+	// 4. Retire the source. Fully delivered goes to sent/; anything else goes
+	//    to failed/ with the reason — the successful copies stay delivered.
+	if len(failures) == 0 {
+		if _, err := d.Store.MoveTo(e.Path, role, BoxSent); err != nil {
+			d.logf("archive sent %s: %v", e.Name, err)
+			return
+		}
+		result.Sent++
+		return
+	}
+
+	reason := fmt.Sprintf(
+		"delivered to %d of %d destinations; failures: %s",
+		delivered, len(h.To), strings.Join(failures, "; "),
+	)
+	d.fail(role, e.Path, reason)
+	result.Failed++
+}
+
+// deliver writes one destination copy, retrying transient filesystem errors.
+func (d *Daemon) deliver(h Handoff, to string) (path string, already bool, err error) {
+	for attempt := 1; ; attempt++ {
+		path, already, err = d.Store.Deliver(h, to)
+		if err == nil || attempt >= deliveryAttempts {
+			return path, already, err
+		}
+		d.logf("deliver %s -> %s attempt %d failed: %v", h.From, to, attempt, err)
+		time.Sleep(time.Duration(attempt) * 20 * time.Millisecond)
+	}
+}
+
+// reject quarantines an invalid message.
 func (d *Daemon) reject(path, role, reason string) {
-	dst, err := d.Store.Reject(path, reason)
-	if err != nil {
+	if _, err := d.Store.Reject(path, reason); err != nil {
 		d.logf("cannot quarantine %s: %v", filepath.Base(path), err)
 		return
 	}
 	d.logf("rejected %s/%s: %s", role, filepath.Base(path), reason)
-	_ = dst
 }
 
-// notify wakes a destination agent with fixed text. Failure is not fatal: the
-// message is already durable in the inbox.
+// fail records a valid request that could not be completed.
+func (d *Daemon) fail(role, path, reason string) {
+	if _, err := d.Store.Fail(role, path, reason); err != nil {
+		d.logf("cannot record failure for %s: %v", filepath.Base(path), err)
+		return
+	}
+	d.logf("failed %s/%s: %s", role, filepath.Base(path), reason)
+}
+
+// notify wakes a destination agent with fixed text.
+//
+// Notification is best effort by design: the message is already durable in the
+// inbox, so a failed wake-up is logged and never rolls back a delivery. The
+// recipient finds the work with `swarm handoff ready <role>`.
 func (d *Daemon) notify(role string) {
 	if d.Notifier == nil {
 		return
 	}
 	if err := d.Notifier.Notify(role); err != nil {
-		d.logf("notify %s: %v", role, err)
+		d.logf("delivered successfully; notification to %s failed: %v", role, err)
 	}
 }
 
@@ -149,4 +242,12 @@ func (d *Daemon) logf(format string, args ...interface{}) {
 		return
 	}
 	fmt.Fprintf(d.Log, "%s  %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+}
+
+// short abbreviates an id for logging.
+func short(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }

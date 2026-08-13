@@ -137,6 +137,12 @@ go run ./cmd/swarm handoff daemon
 # 6. sit down at the coder
 go run ./cmd/swarm sessions attach coder
 #    …work with it… then press Ctrl+b then d to detach
+
+# 7. pass work between roles
+go run ./cmd/swarm handoff send --from specifier --to coder \
+  --type note --priority 20 --note "Implement the approved specification"
+go run ./cmd/swarm handoff ready coder     # accept it
+go run ./cmd/swarm handoff done coder      # finish it, pick up the next
 ```
 
 To shut down:
@@ -172,16 +178,18 @@ your-project/
     │       ├── specifier.prompt
     │       └── …
     └── handoffs/           # durable messages between roles
-        ├── specifier/
-        │   ├── inbox/
-        │   └── outbox/
         ├── coder/
-        │   ├── inbox/
-        │   └── outbox/
+        │   ├── outbox/     # queued, waiting for the daemon
+        │   ├── sent/       # delivered to every destination
+        │   ├── failed/     # valid, but could not be completed + .reason
+        │   ├── inbox/      # delivered here, not yet accepted
+        │   ├── current/    # accepted, being worked on now
+        │   └── completed/  # finished
+        ├── specifier/…
         ├── refactorer/…
         ├── architect/…
-        ├── rejected/       # malformed messages + a .reason file each
-        └── archive/        # acknowledged messages
+        ├── rejected/       # invalid messages + a .reason file each
+        └── archive/        # legacy `ack` destination
 ```
 
 You own `swarm.conf` and `prompts/`. Everything under `.swarm/` is generated and
@@ -362,19 +370,49 @@ scrollback and can start again instantly.
 
 ### Handoffs
 
-Roles talk to each other with **handoffs**: small text files that a background
-daemon moves from a sender's outbox into the recipient's inbox.
+Roles pass work to each other with **handoffs**: small text files that a
+background daemon validates and moves from a sender's outbox into the
+recipient's inbox, where the recipient accepts them one task (or one batch) at
+a time.
 
 ```bash
 swarm handoff send --from <role> --to <role> --type <type> --note "…"
-swarm handoff outbox <role>       # queued, not yet delivered
-swarm handoff daemon              # deliver continuously (Ctrl-C to stop)
-swarm handoff inbox <role>        # delivered, waiting to be read
-swarm handoff ack <role> <file>   # mark one as processed
+swarm handoff outbox <role>   # queued, not yet delivered
+swarm handoff daemon          # validate + deliver continuously (Ctrl-C to stop)
+swarm handoff inbox <role>    # delivered, not yet accepted
+swarm handoff ready <role>    # accept work — the main receive command
+swarm handoff done <role>     # finish current work, pick up the next
 ```
 
-Nothing is delivered until the daemon runs. Sending and reading never delete
-anything by themselves — only `ack` moves a message out of an inbox.
+Nothing is delivered until the daemon runs, and nothing is accepted until
+someone calls `ready`.
+
+#### The lifecycle
+
+Every message moves through directories, so the state of the world is always
+visible with `ls` and always survives a crash or restart.
+
+```
+                    ┌── message is invalid ─────→ rejected/       + .reason
+outbox ─── daemon ──┤
+   │                └── valid, unfulfillable ───→ <sender>/failed/ + .reason
+   │                    (commit won't resolve, inbox unwritable)
+   └── delivered to every destination ─────────→ <sender>/sent/
+
+<recipient>/inbox ──ready──→ current ──done──→ completed
+                                ↑                  │
+                                └── done picks up the next work
+```
+
+Two things worth internalising:
+
+- **Outbound messages are never deleted.** They end up in `sent/` or `failed/`,
+  so you can always audit what a role sent and what became of it.
+- **`rejected` ≠ `failed`.** *Rejected* means the message itself is at fault —
+  unknown role, bad type, missing field, wrong outbox, unparsable file. That is
+  permanent and never retried. *Failed* means a perfectly well-formed request
+  that could not be completed — most often a commit that does not resolve — and
+  it lands in the sender's own `failed/` box to be fixed and re-sent.
 
 #### Sending
 
@@ -389,27 +427,70 @@ swarm handoff send \
 ```
 
 A **git_handoff** transfers implementation work and additionally requires a task
-and a commit:
+and a **real commit, abbreviated to exactly 10 characters**:
 
 ```bash
 swarm handoff send \
   --from coder --to refactorer \
   --type git_handoff \
   --task DEMO-1 \
-  --commit abc123 \
+  --commit "$(git rev-parse --short=10 HEAD)" \
   --priority 20 \
   --note "Ready for refactoring"
+```
+
+One message can go to several roles at once — each gets its own independent
+copy and its own lifecycle:
+
+```bash
+swarm handoff send --from coder --to refactorer,architect \
+  --type note --priority 15 --note "Please review the new cache layer"
 ```
 
 | Flag | Required | Meaning |
 |---|---|---|
 | `--from` | yes | sending role, must be in `swarm.conf` |
-| `--to` | yes | destination role, must differ from `--from` |
+| `--to` | yes | one role, or several separated by commas; never `--from` itself |
 | `--type` | yes | `note` or `git_handoff` (default `note`) |
 | `--note` | yes | human-readable message; may be multi-line |
 | `--priority` | no | `0`–`100`, higher is more urgent (default `10`) |
 | `--task` | for `git_handoff` | task identifier, e.g. `AUTH-42` |
-| `--commit` | for `git_handoff` | commit object name, 4–64 hex characters |
+| `--commit` | for `git_handoff` | exactly 10 hex characters, and it must exist |
+
+Notes carry no Git identity: passing `--task` or `--commit` with `--type note`
+is an error rather than being silently ignored.
+
+`id`, `created_at`, `delivered_at` and `canonical_commit` are generated by
+swarm, never accepted from the sender.
+
+#### How commits are verified
+
+A `git_handoff` names work that actually exists. The daemon checks it in two
+steps:
+
+1. **Shape** — exactly 10 hexadecimal characters (either case). `abc123` and
+   `71ae82cc13ZZ` are rejected without Git being consulted.
+2. **Existence** — the daemon runs, against *this project's* repository:
+
+   ```bash
+   git rev-parse --verify --end-of-options <commit>^{commit}
+   ```
+
+   The `^{commit}` peel means a real object that is not a commit (a blob, a
+   tree) is refused too. The full canonical SHA comes back and is stamped into
+   every delivered copy as `canonical_commit`.
+
+A handoff can never choose which repository it is checked against — that comes
+from the project, not the message. A well-formed commit that does not resolve
+is a *failed* delivery, not a rejected message:
+
+```
+22:21:15  failed refactorer/…-refactorer.handoff: commit ffffffffff does not
+          resolve to a commit in this repository
+```
+
+Swarm verifies and communicates Git identity only. It never cherry-picks or
+merges for you — the recipient inspects the canonical commit and decides.
 
 #### The daemon
 
@@ -425,55 +506,136 @@ destination inbox, quarantines invalid ones, and wakes the recipient's agent.
 It stops cleanly on <kbd>Ctrl</kbd>+<kbd>C</kbd>.
 
 ```
-21:56:37  handoff daemon watching 4 roles every 250ms
-21:56:37  delivered specifier -> coder (note, priority 10)
-21:56:37  delivered coder -> refactorer (git_handoff, priority 20)
-21:56:37  rejected coder/broken.handoff: destination role "foo" is not configured
+22:21:15  handoff daemon watching 4 roles every 250ms
+22:21:15  delivered specifier -> coder (git_handoff, priority 20, id 33a9cc22)
+22:21:15  failed refactorer/…-refactorer.handoff: commit ffffffffff does not
+          resolve to a commit in this repository
+22:21:15  delivered architect -> coder (note, priority 10, id 49de9d62)
 ```
 
-One bad file never stops the daemon: it is moved to
-`.swarm/handoffs/rejected/` next to a `.reason` file, and the pass continues.
+One bad message never stops the daemon: it is moved aside with a `.reason`
+file and the pass continues, as above where two valid messages were delivered
+in the same scan.
 
-#### Reading
+Delivery is idempotent. Every handoff carries a random 128-bit `id`, the
+destination filename derives from it, and the daemon checks the recipient's
+`inbox/`, `current/` **and** `completed/` before writing. A retry after a crash
+finds the earlier copy and reports it as already delivered instead of
+duplicating it. Transient filesystem errors are retried a few times; a failed
+tmux wake-up is only logged, never rolled back, because the message is already
+durable — the recipient still finds it with `handoff ready`.
+
+#### Browsing
 
 ```bash
-swarm handoff inbox coder
+swarm handoff inbox coder    # delivered, not yet accepted
+swarm handoff outbox coder   # queued, not yet delivered
 ```
 
 ```
 INBOX: coder
 
 PRIORITY  FROM        TYPE          TASK       FILE
-20        specifier   git_handoff   AUTH-42    20260813T195637.053408567-specifier-to-coder.handoff
-10        architect   note          -          20260813T195629.294523214-architect-to-coder.handoff
+20        specifier   git_handoff   AUTH-42    20260813T202051…-specifier-to-coder.handoff
+10        architect   note          -          20260813T202052…-architect-to-coder.handoff
 ```
 
-Highest priority first, then oldest first. `swarm handoff outbox coder` uses the
-same format and is the place to look when a message hasn't arrived.
+Highest priority first, then oldest first. Browsing never changes anything — it
+is for humans debugging the queue. `outbox` is where to look when a message
+hasn't arrived.
 
-To read the message itself, open the file (it is plain text):
+#### Receiving work: `ready` and `done`
+
+`ready` is how a role picks up work. It moves the selected message(s) from
+`inbox/` into `current/` and prints them as stable `KEY: value` lines that both
+humans and agents can read:
 
 ```bash
-cat .swarm/handoffs/coder/inbox/*.handoff
+swarm handoff ready coder
 ```
+
+```
+TASK: /…/.swarm/handoffs/coder/current/20260813T202051…-specifier-to-coder.handoff
+ID: 33a9cc22bb28056ad1ffc1a792d24f0e
+TYPE: git_handoff
+FROM: specifier
+PRIORITY: 20
+TASK_NAME: AUTH-42
+COMMIT: 81fd839ede
+CANONICAL_COMMIT: 81fd839edebf9dc25fe6999c7e961b3a14eeb497
+CREATED_AT: 2026-08-13T20:20:51Z
+DELIVERED_AT: 2026-08-13T20:21:15Z
+MESSAGE: Specification ready
+```
+
+A note prints the same shape without the Git lines. With nothing to do, the
+entire output is:
+
+```
+NO_TASK
+```
+
+Calling `ready` again returns **the same work**, and selects nothing new, until
+you finish it. That is what stops a task being picked up twice, and it is also
+how a crash is recovered: state lives in `current/` on disk, so a fresh process
+sees exactly what the old one was doing.
+
+When the work is finished:
+
+```bash
+swarm handoff done coder
+```
+
+```
+DONE: AUTH-42
+TASK: /…/.swarm/handoffs/coder/current/20260813T202052…-architect-to-coder.handoff
+TYPE: note
+FROM: architect
+PRIORITY: 10
+MESSAGE: Please clarify retry semantics
+```
+
+`done` moves everything in `current/` to `completed/` and immediately selects
+the next available work, so an agent can loop on `done` alone. With nothing
+left it prints `DONE: …` followed by `NO_TASK`; with nothing in progress it
+prints `NO_CURRENT_WORK`.
+
+#### Receive modes: task and batch
+
+The last column of `swarm.conf` decides how a role takes work.
 
 ```text
-type: git_handoff
-from: coder
-to: refactorer
-task: DEMO-1
-commit: abc123
-priority: 20
-note: Ready for refactoring
+window coder codex wt-coder task          ← one message at a time
+window refactorer codex wt-refactorer batch  ← everything at the top priority
 ```
 
-Once you've dealt with it:
+**`task`** selects exactly one message: highest priority, then oldest, with a
+deterministic tie-breaker. Everything else waits in the inbox.
+
+**`batch`** selects every message sharing the *highest available* priority.
+Given an inbox of 20, 20, 10:
+
+```
+BATCH: 4ad8f0814b842f001b15de7518414171
+PRIORITY: 20
+BATCH_ITEM: /…/current/20260813T202207…-coder-to-refactorer.handoff
+BATCH_ITEM: /…/current/20260813T202207…-coder-to-refactorer.handoff
+
+TASK: …            ← then each item in full, one block per item
+```
+
+The priority-10 message stays put, and a higher-priority message arriving
+mid-batch does **not** join or displace the active batch — it waits for the
+next one. `done` completes the whole batch at once.
+
+#### `ack` (deprecated)
 
 ```bash
-swarm handoff ack coder 20260813T195637.053408567-specifier-to-coder.handoff
+swarm handoff ack coder <filename>   # moves inbox → archive/
 ```
 
-which moves it to `.swarm/handoffs/archive/`.
+The Step 6 command, kept so old scripts keep working. It prints a deprecation
+warning. Use `ready`/`done` instead — they are the real lifecycle.
 
 #### What agents see
 
@@ -536,24 +698,29 @@ go run ./cmd/swarm sessions attach specifier
 #   → it writes a spec and commits on branch swarm/specifier
 #   → Ctrl+b d
 
-# hand the spec to the coder
+# hand the spec to the coder — note --short=10, the required abbreviation
 go run ./cmd/swarm handoff send \
   --from specifier --to coder \
   --type git_handoff --task RATE-1 \
-  --commit "$(git -C .swarm/worktrees/wt-specifier rev-parse --short HEAD)" \
+  --commit "$(git -C .swarm/worktrees/wt-specifier rev-parse --short=10 HEAD)" \
   --priority 20 --note "Specification ready; acceptance criteria in SPEC.md"
-#   → the daemon delivers it and wakes the coder
+#   → the daemon resolves the commit, delivers it, and wakes the coder
+
+go run ./cmd/swarm handoff ready coder
+#   → prints the task and its CANONICAL_COMMIT, and moves it to current/
 
 go run ./cmd/swarm sessions attach coder
-#   → the coder sees the wake-up, reads its inbox, merges swarm/specifier,
-#     implements, tests, commits
+#   → the coder inspects that commit, merges, implements, tests, commits
 #   → Ctrl+b d
+
+go run ./cmd/swarm handoff done coder
+#   → completes RATE-1 and prints the next task, or NO_TASK
 
 # the coder hands the result on for cleanup
 go run ./cmd/swarm handoff send \
   --from coder --to refactorer \
   --type git_handoff --task RATE-1 \
-  --commit "$(git -C .swarm/worktrees/wt-coder rev-parse --short HEAD)" \
+  --commit "$(git -C .swarm/worktrees/wt-coder rev-parse --short=10 HEAD)" \
   --priority 20 --note "Implementation complete; tests pass"
 
 # tidy up, then review
@@ -630,9 +797,24 @@ look in `.swarm/handoffs/rejected/` for a `.reason` file.
 **`destination role "foo" is not configured`**
 Both `--from` and `--to` must name a role in `swarm.conf`, and they must differ.
 
-**`git_handoff requires a commit` / `commit "zzz" is not a hexadecimal object name`**
-`--type git_handoff` needs `--task` and a `--commit` of 4–64 hex characters.
-Use `--type note` for messages that carry no code.
+**`commit "abc123" must be exactly 10 hexadecimal characters`**
+Use `git rev-parse --short=10 <ref>`. Full SHAs and 7-character abbreviations
+are both refused.
+
+**`commit ffffffffff does not resolve to a commit in this repository`**
+The abbreviation is well formed but names nothing here — usually a typo, or a
+commit that only exists in a worktree branch you have not fetched. The message
+is waiting in the sender's `failed/` box with a `.reason`; fix it and re-send.
+
+**`note must not carry task or commit fields`**
+Use `--type git_handoff` when you want to reference a commit.
+
+**`ready` keeps returning the same task**
+That is deliberate — work in `current/` is yours until `swarm handoff done
+<role>`. It is also how a crash recovers.
+
+**`done` prints `NO_CURRENT_WORK`**
+Nothing was accepted. Run `swarm handoff ready <role>` first.
 
 **`rejected …: file is not a valid handoff`**
 Something wrote a malformed file into an outbox. Prefer `swarm handoff send`,
@@ -648,9 +830,16 @@ internal/git      worktrees and branches (via os/exec git)
 internal/tmux     sessions on a private socket (via os/exec tmux)
 internal/prompt   loads and assembles instructions
 internal/agent    launches/stops agents; backend adapters
-internal/handoff  message model, parser, validation, store, delivery daemon
+internal/handoff  message model, parser, validation, durable store,
+                  priority selector, ready/done lifecycle, delivery daemon
 cmd/swarm         CLI wiring and output
 ```
+
+Inside `internal/handoff` the split is deliberate: `store.go` owns the
+filesystem, `selector.go` is pure priority logic with no I/O, `lifecycle.go`
+implements ready/done, and `daemon.go` only does outbound delivery. Commit
+resolution lives in `internal/git`, behind a `CommitResolver` interface the
+daemon depends on — the handoff packages never shell out to Git themselves.
 
 Rules that keep it honest: the agent layer never creates worktrees, the prompt
 layer knows nothing about tmux, the tmux layer knows nothing about Codex, and
@@ -719,11 +908,21 @@ no test launches a real agent.
 - **Handoff delivery needs the daemon running.** Nothing moves while it is
   stopped; messages simply wait in the outbox.
 - **The daemon polls every 250 ms** rather than watching the filesystem, and
-  assumes it is the only daemon for a repository.
-- **Handoffs carry messages, not code.** No automatic merge, cherry-pick, task
-  state machine, or workflow advancement. `--commit` is checked for shape, not
-  checked against the repository.
-- **`ack` is manual**, and nothing re-notifies an agent that ignored a message.
+  assumes it is the only daemon for a repository. Delivery is idempotent, but
+  there is no lockfile, so two daemons would race on the source file.
+- **Handoffs carry Git identity, not code.** The commit is verified and passed
+  on; no automatic merge, cherry-pick, task state machine, or workflow
+  advancement.
+- **A multi-destination message has one shared fate for its source file** —
+  all-delivered goes to `sent/`, anything else to `failed/` with the partial
+  outcome recorded. Successful copies are never rolled back, but there is no
+  retry of just the failed leg; you re-send.
+- **`done` completes whatever is in `current/`** without checking that the work
+  was actually done.
+- **Nothing re-notifies** an agent that ignored a wake-up; `ready` is the
+  recovery path.
+- **`ack` is deprecated** but still present, so two lifecycles technically
+  coexist until it is removed.
 - **New worktrees branch from current `HEAD`**, not from a fixed base branch.
 - **POSIX shell assumed** in the tmux pane for the `"$(cat …)"` construct.
 - **Not concurrency-safe** across simultaneous invocations in the same repo.

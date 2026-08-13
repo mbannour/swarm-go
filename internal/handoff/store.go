@@ -12,11 +12,28 @@ import (
 // Dir is the repository-relative home of all handoff state.
 const Dir = ".swarm/handoffs"
 
-// Sub-directories that are not role-owned.
+// Role-owned boxes.
 const (
-	rejectedDir = "rejected"
-	archiveDir  = "archive"
+	BoxInbox     = "inbox"     // delivered, not yet accepted
+	BoxOutbox    = "outbox"    // queued for the daemon
+	BoxSent      = "sent"      // delivered to every destination
+	BoxFailed    = "failed"    // valid request that could not be completed
+	BoxCurrent   = "current"   // accepted, being worked on
+	BoxCompleted = "completed" // finished
 )
+
+// roleBoxes is every per-role directory.
+var roleBoxes = []string{BoxInbox, BoxOutbox, BoxSent, BoxFailed, BoxCurrent, BoxCompleted}
+
+// Shared directories that belong to no role.
+const (
+	rejectedDir = "rejected" // the message itself is invalid
+	archiveDir  = "archive"  // acknowledged via the legacy ack command
+)
+
+// batchMarker records the batch id of an active batch. The leading dot keeps
+// it out of handoff listings.
+const batchMarker = ".batch"
 
 // Store owns every filesystem operation on the handoff tree. Only configured
 // roles can name a directory here.
@@ -35,9 +52,9 @@ func NewStore(repoRoot string, roles Roles) *Store {
 	}
 }
 
-// roleDir resolves a role-owned directory, refusing anything unconfigured.
-// This is the only place a role name becomes a path component.
-func (s *Store) roleDir(role, box string) (string, error) {
+// Box resolves a role-owned directory, refusing anything unconfigured. This is
+// the only place a role name becomes a path component.
+func (s *Store) Box(role, box string) (string, error) {
 	if !s.Roles.Has(role) {
 		return "", fmt.Errorf("role %q is not configured", role)
 	}
@@ -45,14 +62,26 @@ func (s *Store) roleDir(role, box string) (string, error) {
 	if role == "" || role == "." || role == ".." || strings.ContainsAny(role, `/\`) {
 		return "", fmt.Errorf("invalid role name %q", role)
 	}
+
+	valid := false
+	for _, b := range roleBoxes {
+		if b == box {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return "", fmt.Errorf("unknown box %q", box)
+	}
+
 	return filepath.Join(s.Root, role, box), nil
 }
 
 // InboxDir is the absolute inbox path of a role.
-func (s *Store) InboxDir(role string) (string, error) { return s.roleDir(role, "inbox") }
+func (s *Store) InboxDir(role string) (string, error) { return s.Box(role, BoxInbox) }
 
 // OutboxDir is the absolute outbox path of a role.
-func (s *Store) OutboxDir(role string) (string, error) { return s.roleDir(role, "outbox") }
+func (s *Store) OutboxDir(role string) (string, error) { return s.Box(role, BoxOutbox) }
 
 // RejectedDir is where invalid messages are quarantined.
 func (s *Store) RejectedDir() string { return filepath.Join(s.Root, rejectedDir) }
@@ -65,15 +94,13 @@ func (s *Store) EnsureDirs(roles []string) error {
 	dirs := []string{s.RejectedDir(), s.ArchiveDir()}
 
 	for _, role := range roles {
-		in, err := s.InboxDir(role)
-		if err != nil {
-			return err
+		for _, box := range roleBoxes {
+			dir, err := s.Box(role, box)
+			if err != nil {
+				return err
+			}
+			dirs = append(dirs, dir)
 		}
-		out, err := s.OutboxDir(role)
-		if err != nil {
-			return err
-		}
-		dirs = append(dirs, in, out)
 	}
 
 	for _, d := range dirs {
@@ -85,56 +112,52 @@ func (s *Store) EnsureDirs(roles []string) error {
 	return nil
 }
 
-// FileName builds a unique, sortable name for a handoff.
-func FileName(now time.Time, from, to string) string {
-	return fmt.Sprintf("%s-%s-to-%s%s", now.UTC().Format(timeFormat), from, to, FileExt)
+// OutboxName is the file name of a queued logical handoff.
+func OutboxName(created time.Time, id, from string) string {
+	return fmt.Sprintf("%s-%s-%s%s", created.UTC().Format(timeFormat), id, from, FileExt)
 }
 
-// Send writes a handoff into the sender's outbox atomically: the content is
-// written to a temporary file in the same directory, synced, then renamed into
-// place, so a scanning daemon never observes a partial file.
-func (s *Store) Send(h Handoff) (string, error) {
+// DeliveryName is the file name of one destination's copy. It embeds the
+// handoff id, which is what makes a repeated delivery detectable.
+func DeliveryName(created time.Time, id, from, to string) string {
+	return fmt.Sprintf("%s-%s-%s-to-%s%s", created.UTC().Format(timeFormat), id, from, to, FileExt)
+}
+
+// Send stamps a handoff with generated metadata and writes it into the
+// sender's outbox atomically: content is written to a temporary file in the
+// same directory, synced, then renamed, so a scanning daemon never observes a
+// partial file.
+func (s *Store) Send(h Handoff) (Entry, error) {
+	// Lifecycle metadata is generated here, never accepted from the caller.
+	id, err := NewID()
+	if err != nil {
+		return Entry{}, err
+	}
+	h.ID = id
+	h.CreatedAt = s.Now().UTC()
+	h.DeliveredAt = time.Time{}
+	h.CanonicalCommit = ""
+
 	if err := Validate(h, s.Roles, h.From); err != nil {
-		return "", err
+		return Entry{}, err
 	}
 
 	dir, err := s.OutboxDir(h.From)
 	if err != nil {
-		return "", err
+		return Entry{}, err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+		return Entry{}, err
 	}
 
-	name, err := s.uniqueName(dir, h.From, h.To)
-	if err != nil {
-		return "", err
-	}
+	name := OutboxName(h.CreatedAt, h.ID, h.From)
 	path := filepath.Join(dir, name)
 
 	if err := writeFileAtomic(path, []byte(Marshal(h))); err != nil {
-		return "", err
+		return Entry{}, err
 	}
 
-	return path, nil
-}
-
-// uniqueName picks a file name that does not already exist in dir.
-func (s *Store) uniqueName(dir, from, to string) (string, error) {
-	base := FileName(s.Now(), from, to)
-
-	name := base
-	for i := 1; ; i++ {
-		if _, err := os.Stat(filepath.Join(dir, name)); os.IsNotExist(err) {
-			return name, nil
-		} else if err != nil {
-			return "", err
-		}
-		if i > 1000 {
-			return "", fmt.Errorf("cannot find a free file name in %s", dir)
-		}
-		name = strings.TrimSuffix(base, FileExt) + fmt.Sprintf("-%d", i) + FileExt
-	}
+	return Entry{Handoff: h, Name: name, Path: path}, nil
 }
 
 // writeFileAtomic writes data to path via a temp file in the same directory.
@@ -203,15 +226,16 @@ func (s *Store) list(dir string) (entries []Entry, bad []string, err error) {
 		entries = append(entries, Entry{Handoff: h, Name: name, Path: path})
 	}
 
-	sortEntries(entries)
+	SortEntries(entries)
 	sort.Strings(bad)
 
 	return entries, bad, nil
 }
 
-// sortEntries orders by priority descending, then by name (which is a
-// timestamp, so ties resolve oldest-first).
-func sortEntries(entries []Entry) {
+// SortEntries orders by priority descending, then by name. Names begin with a
+// creation timestamp, so ties resolve oldest-first, and the trailing id makes
+// the order total even for identical timestamps.
+func SortEntries(entries []Entry) {
 	sort.SliceStable(entries, func(i, j int) bool {
 		if entries[i].Priority != entries[j].Priority {
 			return entries[i].Priority > entries[j].Priority
@@ -220,31 +244,100 @@ func sortEntries(entries []Entry) {
 	})
 }
 
-// Inbox lists a role's pending messages.
-func (s *Store) Inbox(role string) ([]Entry, error) {
-	dir, err := s.InboxDir(role)
+// List returns the parsable entries of one of a role's boxes.
+func (s *Store) List(role, box string) ([]Entry, error) {
+	dir, err := s.Box(role, box)
 	if err != nil {
 		return nil, err
 	}
 	entries, _, err := s.list(dir)
 	return entries, err
 }
+
+// Inbox lists a role's delivered, unaccepted messages.
+func (s *Store) Inbox(role string) ([]Entry, error) { return s.List(role, BoxInbox) }
 
 // Outbox lists a role's undelivered messages.
-func (s *Store) Outbox(role string) ([]Entry, error) {
-	dir, err := s.OutboxDir(role)
-	if err != nil {
-		return nil, err
+func (s *Store) Outbox(role string) ([]Entry, error) { return s.List(role, BoxOutbox) }
+
+// Current lists a role's accepted, in-progress work.
+func (s *Store) Current(role string) ([]Entry, error) { return s.List(role, BoxCurrent) }
+
+// HasDelivery reports whether a handoff id is already present anywhere in the
+// destination's receive-side lifecycle. This is what makes delivery idempotent:
+// a repeated attempt after a crash or retry finds the earlier copy instead of
+// creating a second one.
+func (s *Store) HasDelivery(role, id string) (bool, error) {
+	if id == "" {
+		return false, nil
 	}
-	entries, _, err := s.list(dir)
-	return entries, err
+
+	for _, box := range []string{BoxInbox, BoxCurrent, BoxCompleted} {
+		dir, err := s.Box(role, box)
+		if err != nil {
+			return false, err
+		}
+
+		items, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return false, err
+		}
+
+		for _, item := range items {
+			if strings.Contains(item.Name(), "-"+id+"-") {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
 }
 
-// Deliver moves a message from an outbox into the destination inbox with a
-// single rename, which is atomic on the same filesystem. Delivery falls back to
-// copy+remove only if the rename crosses a filesystem boundary.
-func (s *Store) Deliver(e Entry) (string, error) {
-	dir, err := s.InboxDir(e.To)
+// Deliver writes one destination's copy into its inbox, stamping delivered_at
+// and any canonical commit. It is idempotent: if the id is already present in
+// that role's inbox, current or completed, nothing is written.
+//
+// The source file is not consumed here — the daemon decides where the logical
+// handoff goes once every destination has been attempted.
+func (s *Store) Deliver(h Handoff, to string) (path string, already bool, err error) {
+	dir, err := s.Box(to, BoxInbox)
+	if err != nil {
+		return "", false, err
+	}
+
+	exists, err := s.HasDelivery(to, h.ID)
+	if err != nil {
+		return "", false, err
+	}
+	if exists {
+		return "", true, nil
+	}
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", false, err
+	}
+
+	// Each destination gets its own copy with its own lifecycle.
+	copyForDest := h
+	copyForDest.To = []string{to}
+	copyForDest.DeliveredAt = s.Now().UTC()
+
+	name := DeliveryName(h.CreatedAt, h.ID, h.From, to)
+	dst := filepath.Join(dir, name)
+
+	if err := writeFileAtomic(dst, []byte(Marshal(copyForDest))); err != nil {
+		return "", false, err
+	}
+
+	return dst, false, nil
+}
+
+// MoveTo moves a file into one of a role's boxes, keeping its name.
+func (s *Store) MoveTo(path, role, box string) (string, error) {
+	dir, err := s.Box(role, box)
 	if err != nil {
 		return "", err
 	}
@@ -252,33 +345,39 @@ func (s *Store) Deliver(e Entry) (string, error) {
 		return "", err
 	}
 
-	name, err := s.uniqueNameFor(dir, e.Name)
+	name, err := uniqueName(dir, filepath.Base(path))
 	if err != nil {
 		return "", err
 	}
 	dst := filepath.Join(dir, name)
 
-	if err := os.Rename(e.Path, dst); err == nil {
-		return dst, nil
-	}
-
-	// Cross-device: write atomically into the inbox, then drop the source.
-	data, err := os.ReadFile(e.Path)
-	if err != nil {
-		return "", err
-	}
-	if err := writeFileAtomic(dst, data); err != nil {
-		return "", err
-	}
-	if err := os.Remove(e.Path); err != nil {
+	if err := moveFile(path, dst); err != nil {
 		return "", err
 	}
 
 	return dst, nil
 }
 
-// uniqueNameFor keeps an existing file name unless it is already taken.
-func (s *Store) uniqueNameFor(dir, name string) (string, error) {
+// moveFile renames when possible and falls back to atomic copy + remove when
+// the move crosses a filesystem boundary.
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(dst, data); err != nil {
+		return err
+	}
+
+	return os.Remove(src)
+}
+
+// uniqueName keeps a file name unless it is already taken.
+func uniqueName(dir, name string) (string, error) {
 	base := filepath.Base(name)
 
 	candidate := base
@@ -295,42 +394,97 @@ func (s *Store) uniqueNameFor(dir, name string) (string, error) {
 	}
 }
 
-// Reject quarantines a file and records why, next to it as <name>.reason.
+// Reject quarantines an invalid message and records why, next to it as
+// <name>.reason. Rejection means the message itself is at fault.
 func (s *Store) Reject(path, reason string) (string, error) {
-	dir := s.RejectedDir()
+	return s.quarantine(s.RejectedDir(), path, reason)
+}
+
+// Fail moves a valid outbound request that could not be completed into the
+// sender's failed box, with the reason beside it.
+func (s *Store) Fail(role, path, reason string) (string, error) {
+	dir, err := s.Box(role, BoxFailed)
+	if err != nil {
+		return "", err
+	}
+	return s.quarantine(dir, path, reason)
+}
+
+// quarantine moves a file into dir and writes its reason file.
+func (s *Store) quarantine(dir, path, reason string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
 
-	name, err := s.uniqueNameFor(dir, filepath.Base(path))
+	name, err := uniqueName(dir, filepath.Base(path))
 	if err != nil {
 		return "", err
 	}
 	dst := filepath.Join(dir, name)
 
-	if err := os.Rename(path, dst); err != nil {
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return "", readErr
-		}
-		if writeErr := writeFileAtomic(dst, data); writeErr != nil {
-			return "", writeErr
-		}
-		if rmErr := os.Remove(path); rmErr != nil {
-			return "", rmErr
-		}
+	if err := moveFile(path, dst); err != nil {
+		return "", err
 	}
 
-	if err := writeFileAtomic(dst+".reason", []byte(reason+"\n")); err != nil {
+	stamped := fmt.Sprintf("%s\n%s\n", s.Now().UTC().Format(time.RFC3339), reason)
+	if err := writeFileAtomic(dst+".reason", []byte(stamped)); err != nil {
 		return "", err
 	}
 
 	return dst, nil
 }
 
-// Ack moves a processed message out of a role's inbox into the archive.
+// BatchID returns the id of a role's active batch, or "" when there is none.
+func (s *Store) BatchID(role string) (string, error) {
+	dir, err := s.Box(role, BoxCurrent)
+	if err != nil {
+		return "", err
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, batchMarker))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+
+	return strings.TrimSpace(string(data)), nil
+}
+
+// SetBatchID records the active batch id.
+func (s *Store) SetBatchID(role, id string) error {
+	dir, err := s.Box(role, BoxCurrent)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return writeFileAtomic(filepath.Join(dir, batchMarker), []byte(id+"\n"))
+}
+
+// ClearBatchID forgets the active batch id.
+func (s *Store) ClearBatchID(role string) error {
+	dir, err := s.Box(role, BoxCurrent)
+	if err != nil {
+		return err
+	}
+
+	err = os.Remove(filepath.Join(dir, batchMarker))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	return nil
+}
+
+// Ack moves a message out of a role's inbox into the archive.
+//
+// Deprecated: this is the Step 6 lifecycle. Prefer ready/done, which move work
+// through current/ and completed/. Kept so existing scripts keep working.
 func (s *Store) Ack(role, name string) (string, error) {
-	dir, err := s.InboxDir(role)
+	dir, err := s.Box(role, BoxInbox)
 	if err != nil {
 		return "", err
 	}
@@ -352,13 +506,13 @@ func (s *Store) Ack(role, name string) (string, error) {
 		return "", err
 	}
 
-	dstName, err := s.uniqueNameFor(s.ArchiveDir(), name)
+	dstName, err := uniqueName(s.ArchiveDir(), name)
 	if err != nil {
 		return "", err
 	}
 	dst := filepath.Join(s.ArchiveDir(), dstName)
 
-	if err := os.Rename(src, dst); err != nil {
+	if err := moveFile(src, dst); err != nil {
 		return "", err
 	}
 
