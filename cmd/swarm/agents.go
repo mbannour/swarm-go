@@ -7,6 +7,7 @@ import (
 	"github.com/mbannour/swarm-go/internal/agent"
 	"github.com/mbannour/swarm-go/internal/config"
 	"github.com/mbannour/swarm-go/internal/git"
+	"github.com/mbannour/swarm-go/internal/handoff"
 	"github.com/mbannour/swarm-go/internal/prompt"
 	"github.com/mbannour/swarm-go/internal/tmux"
 )
@@ -38,11 +39,14 @@ func runAgents(args []string) {
 		}
 	}
 
+	store := handoff.NewStore(wtMgr.Root, handoff.NewRoles(configuredRoles(cfg)))
+	life := handoff.NewLifecycle(store, receiveModeLookup(cfg))
+
 	switch args[0] {
 	case "start":
 		fail(agentsStart(mgr, wtMgr.Root, roles))
 	case "list":
-		fail(agentsList(mgr, roles))
+		fail(agentsList(mgr, life, roles))
 	case "stop":
 		fail(agentsStop(mgr, roles))
 	default:
@@ -82,7 +86,15 @@ func filterRole(roles []agent.Role, name string) ([]agent.Role, error) {
 }
 
 func agentsStart(mgr *agent.Manager, repoRoot string, roles []agent.Role) error {
+	// Agents will invoke this path for the whole life of their session, so it
+	// must outlive this process. A `go run` scratch binary is refused here.
+	swarmBin, err := agent.ResolveBinary(repoRoot)
+	if err != nil {
+		return err
+	}
+
 	fmt.Println("Starting four-pack agents")
+	fmt.Printf("using %s\n", swarmBin)
 	fmt.Println()
 
 	for _, r := range roles {
@@ -91,12 +103,17 @@ func agentsStart(mgr *agent.Manager, repoRoot string, roles []agent.Role) error 
 			return fmt.Errorf("load prompt for %s: %w", r.Name, err)
 		}
 
+		// A role with no downstream simply gets no NEXT_ROLE line.
+		nextRole, _ := handoff.NextRole(r.Name)
+
 		assembled := prompt.Assemble(set, prompt.RuntimeContext{
 			Role:        r.Name,
 			RepoRoot:    repoRoot,
 			Worktree:    r.Worktree,
 			Branch:      r.Branch,
 			ReceiveMode: r.ReceiveMode,
+			NextRole:    nextRole,
+			SwarmBin:    swarmBin,
 		})
 
 		started, err := mgr.Start(r, assembled)
@@ -113,15 +130,23 @@ func agentsStart(mgr *agent.Manager, repoRoot string, roles []agent.Role) error 
 	return nil
 }
 
-func agentsList(mgr *agent.Manager, roles []agent.Role) error {
-	fmt.Printf("%-12s %-10s %-20s %s\n", "ROLE", "BACKEND", "SESSION", "STATUS")
+func agentsList(mgr *agent.Manager, life *handoff.Lifecycle, roles []agent.Role) error {
+	fmt.Printf("%-12s %-10s %-20s %-16s %s\n", "ROLE", "BACKEND", "SESSION", "AGENT", "WORK")
 
 	for _, r := range roles {
 		state, err := mgr.Status(r)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("%-12s %-10s %-20s %s\n", r.Name, r.Backend, tmux.SessionName(r.Name), state)
+
+		// Work state comes from the filesystem lifecycle, not the process.
+		work, err := life.Status(r.Name)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("%-12s %-10s %-20s %-16s %s\n",
+			r.Name, r.Backend, tmux.SessionName(r.Name), state, work.State())
 	}
 
 	return nil

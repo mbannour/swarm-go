@@ -41,6 +41,9 @@ func main() {
 	case "handoff":
 		runHandoff(os.Args[2:])
 
+	case "status":
+		runStatus()
+
 	default:
 		fmt.Printf("unknown command: %s\n\n", os.Args[1])
 		printUsage()
@@ -102,8 +105,12 @@ func printUsage() {
   swarm handoff inbox <role>
   swarm handoff outbox <role>
   swarm handoff ready <role>
+  swarm handoff current <role>
+  swarm handoff status <role>
+  swarm handoff next --from <role> [...]
   swarm handoff done <role>
-  swarm handoff daemon`)
+  swarm handoff daemon
+  swarm status`)
 }
 
 func printRoles() {

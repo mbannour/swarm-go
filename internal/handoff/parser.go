@@ -38,6 +38,7 @@ func Marshal(h Handoff) string {
 	}
 
 	writeIf("id", h.ID)
+	writeIf("source_handoff_id", h.SourceID)
 	fmt.Fprintf(&b, "type: %s\n", h.Type)
 	fmt.Fprintf(&b, "from: %s\n", h.From)
 	fmt.Fprintf(&b, "to: %s\n", strings.Join(h.To, ","))
@@ -98,6 +99,8 @@ func Unmarshal(data []byte) (Handoff, error) {
 		switch key {
 		case "id":
 			h.ID = value
+		case "source_handoff_id":
+			h.SourceID = value
 		case "type":
 			h.Type = Type(value)
 		case "from":

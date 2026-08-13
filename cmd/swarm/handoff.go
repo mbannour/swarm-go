@@ -17,7 +17,7 @@ import (
 
 func runHandoff(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: swarm handoff <send|inbox|outbox|ready|done|ack|daemon>")
+		fmt.Println("usage: swarm handoff <send|next|inbox|outbox|ready|current|status|done|ack|daemon>")
 		os.Exit(1)
 	}
 
@@ -34,12 +34,18 @@ func runHandoff(args []string) {
 	switch args[0] {
 	case "send":
 		fail(handoffSend(store, args[1:]))
+	case "next":
+		fail(handoffNext(life, args[1:]))
 	case "inbox":
 		fail(handoffBox(store, handoff.BoxInbox, args[1:]))
 	case "outbox":
 		fail(handoffBox(store, handoff.BoxOutbox, args[1:]))
 	case "ready":
 		fail(handoffReady(life, args[1:]))
+	case "current":
+		fail(handoffCurrent(life, args[1:]))
+	case "status":
+		fail(handoffStatus(life, args[1:]))
 	case "done":
 		fail(handoffDone(life, args[1:]))
 	case "ack":
@@ -116,6 +122,142 @@ func handoffSend(store *handoff.Store, args []string) error {
 	fmt.Printf("  file %s\n", entry.Path)
 
 	return nil
+}
+
+// handoffNext sends a role's current work downstream along the four-pack
+// route. It is the command agents use, and it is safe to re-run.
+func handoffNext(life *handoff.Lifecycle, args []string) error {
+	fs := flag.NewFlagSet("handoff next", flag.ContinueOnError)
+
+	var (
+		from     = fs.String("from", "", "sending role")
+		to       = fs.String("to", "", "override the routed destination")
+		typ      = fs.String("type", string(handoff.TypeNote), "git_handoff or note")
+		task     = fs.String("task", "", "task identifier (required for git_handoff)")
+		commit   = fs.String("commit", "", "10-character commit abbreviation (required for git_handoff)")
+		priority = fs.Int("priority", 10, "0..100, higher is more urgent")
+		note     = fs.String("note", "", "human-readable message")
+	)
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *from == "" {
+		return fmt.Errorf("usage: swarm handoff next --from <role> --type <type> --note <text> [...]")
+	}
+
+	destinations := splitRoles(*to)
+	if len(destinations) == 0 {
+		routed, err := handoff.NextRole(*from)
+		if err != nil {
+			return err
+		}
+		destinations = []string{routed}
+	}
+
+	entry, already, err := life.Advance(*from, handoff.Handoff{
+		Type:     handoff.Type(*typ),
+		To:       destinations,
+		Task:     *task,
+		Commit:   *commit,
+		Priority: *priority,
+		Note:     *note,
+	})
+	if err != nil {
+		return fmt.Errorf("send handoff: %w", err)
+	}
+
+	if already {
+		// The same current work already produced a handoff: report it rather
+		// than creating a second one.
+		fmt.Println("ALREADY_SENT")
+	} else {
+		fmt.Println("SENT")
+	}
+
+	fmt.Printf("ID: %s\n", entry.ID)
+	fmt.Printf("SOURCE_ID: %s\n", entry.SourceID)
+	fmt.Printf("TO: %s\n", strings.Join(entry.To, ","))
+	fmt.Printf("TYPE: %s\n", entry.Type)
+	fmt.Printf("FILE: %s\n", entry.Path)
+
+	return nil
+}
+
+// handoffCurrent prints the active work without changing any state.
+func handoffCurrent(life *handoff.Lifecycle, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: swarm handoff current <role>")
+	}
+
+	status, err := life.Status(args[0])
+	if err != nil {
+		return err
+	}
+
+	if len(status.Current) == 0 {
+		fmt.Println("NO_CURRENT_WORK")
+		return nil
+	}
+
+	for i, e := range status.Current {
+		if i > 0 {
+			fmt.Println()
+		}
+		fmt.Printf("CURRENT: %s\n", e.Path)
+		printEntryFields(e)
+	}
+
+	return nil
+}
+
+// handoffStatus reports a role's work state, including whether the downstream
+// handoff for its current work has already been created.
+func handoffStatus(life *handoff.Lifecycle, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: swarm handoff status <role>")
+	}
+
+	status, err := life.Status(args[0])
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("ROLE: %s\n", status.Role)
+	fmt.Printf("RECEIVE_MODE: %s\n", status.Mode)
+	fmt.Printf("STATE: %s\n", status.State())
+	fmt.Printf("CURRENT_COUNT: %d\n", len(status.Current))
+	fmt.Printf("INBOX_COUNT: %d\n", status.Inbox)
+
+	if len(status.Current) > 0 {
+		fmt.Printf("CURRENT_ID: %s\n", status.Current[0].ID)
+		if status.Current[0].Task != "" {
+			fmt.Printf("TASK_NAME: %s\n", status.Current[0].Task)
+		}
+	}
+
+	if status.DownstreamSent {
+		fmt.Println("DOWNSTREAM_SENT: yes")
+		for _, e := range status.Downstream {
+			fmt.Printf("DOWNSTREAM_ID: %s\n", e.ID)
+			fmt.Printf("DOWNSTREAM_TO: %s\n", strings.Join(e.To, ","))
+		}
+	} else {
+		fmt.Println("DOWNSTREAM_SENT: no")
+	}
+
+	return nil
+}
+
+// splitRoles parses a comma-separated role list.
+func splitRoles(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func handoffBox(store *handoff.Store, box string, args []string) error {
@@ -229,6 +371,12 @@ func batchLabel(s handoff.Selection) string {
 
 func printEntry(e handoff.Entry) {
 	fmt.Printf("TASK: %s\n", e.Path)
+	printEntryFields(e)
+}
+
+// printEntryFields prints everything but the leading path line, which differs
+// between `ready` (TASK:) and `current` (CURRENT:).
+func printEntryFields(e handoff.Entry) {
 	fmt.Printf("ID: %s\n", e.ID)
 	fmt.Printf("TYPE: %s\n", e.Type)
 	fmt.Printf("FROM: %s\n", e.From)

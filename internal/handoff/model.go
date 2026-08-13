@@ -48,6 +48,7 @@ const (
 // application generates them, a sender never supplies them.
 type Handoff struct {
 	ID              string    // generated, unique per logical handoff
+	SourceID        string    // id of the current work that produced this one
 	Type            Type      //
 	From            string    //
 	To              []string  // one or more configured roles

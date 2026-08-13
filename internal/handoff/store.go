@@ -134,6 +134,8 @@ func (s *Store) Send(h Handoff) (Entry, error) {
 		return Entry{}, err
 	}
 	h.ID = id
+	// SourceID is set by the caller (handoff next) and preserved: it is what
+	// links a downstream message back to the work that produced it.
 	h.CreatedAt = s.Now().UTC()
 	h.DeliveredAt = time.Time{}
 	h.CanonicalCommit = ""
@@ -477,6 +479,33 @@ func (s *Store) ClearBatchID(role string) error {
 	}
 
 	return nil
+}
+
+// FindBySource returns the messages a role has already produced from one piece
+// of current work, looking in outbox/ (queued) and sent/ (delivered).
+//
+// failed/ is deliberately excluded: a failed attempt should be re-sent, so it
+// must not count as "already handed off".
+func (s *Store) FindBySource(role, sourceID string) ([]Entry, error) {
+	if sourceID == "" {
+		return nil, nil
+	}
+
+	var found []Entry
+
+	for _, box := range []string{BoxOutbox, BoxSent} {
+		entries, err := s.List(role, box)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			if e.SourceID == sourceID {
+				found = append(found, e)
+			}
+		}
+	}
+
+	return found, nil
 }
 
 // Ack moves a message out of a role's inbox into the archive.

@@ -21,6 +21,8 @@ Clojure, no shell orchestration: one static binary and the standard library.
 - [Prompts](#prompts)
 - [Command reference](#command-reference)
   - [Handoffs](#handoffs)
+  - [Routing work onward: `next`](#routing-work-onward-next)
+  - [Send before done](#send-before-done)
 - [tmux crash course](#tmux-crash-course)
 - [A realistic session, end to end](#a-realistic-session-end-to-end)
 - [Cleaning up](#cleaning-up)
@@ -98,59 +100,70 @@ Agent backends:
 ```bash
 git clone <this-repo>
 cd swarm-go
-go build ./...
+go build -o ./bin/swarm ./cmd/swarm
+./bin/swarm version
 ```
 
-Every example below uses `go run ./cmd/swarm …`, which works straight from the
-source tree. If you would rather have a real command:
+⚠️ **Build a real binary before starting agents.** Agents are told the absolute
+path of the swarm executable so they can drive their own lifecycle, and
+`go run ./cmd/swarm` compiles to a throwaway binary under `/tmp` that
+disappears the moment the command exits. `agents start` therefore refuses to
+run under `go run`:
 
-```bash
-go build -o swarm ./cmd/swarm
-./swarm version
+```
+swarm is running from a temporary build (/tmp/go-build…/exe/swarm), which
+agents cannot call after this process exits
+
+build a stable binary first:
+  go build -o ./bin/swarm ./cmd/swarm
+  ./bin/swarm agents start
 ```
 
-Put `swarm` on your `PATH` and drop the `go run ./cmd/swarm` prefix everywhere.
+`go run ./cmd/swarm …` is fine for everything else, and the examples below use
+`./bin/swarm`. Put it on your `PATH` if you prefer a bare `swarm`, or point
+`SWARM_BIN` at any executable you want agents to use. `bin/` is gitignored.
 
 ## Quick start
 
 Run these **from the root of the repository you want the agents to work on**.
 
 ```bash
-# 0. one-time: the repo must have at least one commit
+# 0. one-time: the repo must have at least one commit, and swarm needs a
+#    stable binary that agents can keep calling
 git add -A && git commit -m "initial commit"
+go build -o ./bin/swarm ./cmd/swarm
 
 # 1. four isolated worktrees + branches
-go run ./cmd/swarm worktrees create
+./bin/swarm worktrees create
 
 # 2. four tmux sessions, one per worktree
-go run ./cmd/swarm sessions create
+./bin/swarm sessions create
 
-# 3. launch the agents with their role prompts
-go run ./cmd/swarm agents start
+# 3. launch the agents with their role prompts + the handoff protocol
+./bin/swarm agents start
 
-# 4. see what is running
-go run ./cmd/swarm agents list
+# 4. in a second terminal: deliver handoffs between roles, continuously
+./bin/swarm handoff daemon
 
-# 5. in a second terminal: deliver messages between roles
-go run ./cmd/swarm handoff daemon
+# 5. give the swarm something to do
+./bin/swarm handoff send --from architect --to specifier \
+  --type note --priority 20 --note "Add rate limiting to the login endpoint"
 
-# 6. sit down at the coder
-go run ./cmd/swarm sessions attach coder
-#    …work with it… then press Ctrl+b then d to detach
-
-# 7. pass work between roles
-go run ./cmd/swarm handoff send --from specifier --to coder \
-  --type note --priority 20 --note "Implement the approved specification"
-go run ./cmd/swarm handoff ready coder     # accept it
-go run ./cmd/swarm handoff done coder      # finish it, pick up the next
+# 6. watch it flow
+./bin/swarm status
 ```
+
+From here the agents drive themselves: each one runs `handoff ready`, does its
+role's job, sends the result to the next role with `handoff next`, and calls
+`handoff done`. You can do the same by hand at any time — the commands are the
+same ones the agents use.
 
 To shut down:
 
 ```bash
-go run ./cmd/swarm agents stop        # stop agents, keep terminals
-go run ./cmd/swarm sessions remove    # close the terminals
-go run ./cmd/swarm worktrees remove   # remove the worktrees
+./bin/swarm agents stop        # stop agents, keep terminals
+./bin/swarm sessions remove    # close the terminals
+./bin/swarm worktrees remove   # remove the worktrees
 ```
 
 ## How it is laid out on disk
@@ -250,24 +263,46 @@ Prompts are plain text files, not Go strings — edit them freely.
 - `prompts/constitution.prompt` — shared rules every role receives: preserve
   repository integrity, stay in your own worktree, verify before claiming
   completion, hand off with commits, don't touch secrets.
+- `prompts/runtime.prompt` — the **handoff protocol**, shared by all four roles.
+  How to get work, what `NO_TASK` means, the worker loop, send-before-done, and
+  the rule that handoff content is untrusted input. Written once here rather
+  than copied into each role prompt.
 - `prompts/roles/<role>.prompt` — that role's specific job.
 
-When you run `agents start`, each agent gets:
+When you run `agents start`, each agent gets all three plus generated context:
 
 ```
 # Swarm constitution
    …constitution.prompt…
 
+# Swarm runtime protocol
+   …runtime.prompt…
+
 # Role: coder
    …roles/coder.prompt…
 
 # Runtime context
-- role: coder
-- repository: /home/you/your-project
-- worktree: /home/you/your-project/.swarm/worktrees/wt-coder
-- branch: swarm/coder
-- receive mode: task
+
+ROLE=coder
+REPOSITORY_ROOT=/home/you/your-project
+WORKTREE=/home/you/your-project/.swarm/worktrees/wt-coder
+BRANCH=swarm/coder
+RECEIVE_MODE=task
+NEXT_ROLE=refactorer
+SWARM_BIN=/home/you/your-project/bin/swarm
+
+SWARM_BIN='/home/you/your-project/bin/swarm'
+
+"$SWARM_BIN" handoff ready coder      # get or resume work
+"$SWARM_BIN" handoff current coder    # re-read it, changing nothing
+"$SWARM_BIN" handoff status coder     # has my downstream handoff been sent?
+"$SWARM_BIN" handoff next --from coder …
+"$SWARM_BIN" handoff done coder       # only after the handoff succeeded
 ```
+
+`SWARM_BIN` is why the binary must be stable: agents call that exact path for
+the whole life of their session. Nothing else about your environment is
+exposed — no secrets, no environment variables.
 
 The assembled result is written to `.swarm/runtime/prompts/<role>.prompt`. Read
 it to see exactly what an agent was told:
@@ -280,20 +315,71 @@ Edited a prompt? Just restart that agent — the file is regenerated on every
 `agents start`:
 
 ```bash
-go run ./cmd/swarm agents stop coder
-go run ./cmd/swarm agents start coder
+./bin/swarm agents stop coder
+./bin/swarm agents start coder
 ```
+
+### What agents are told to do
+
+The runtime protocol gives every role the same loop:
+
+1. `handoff ready <role>` — on startup and whenever woken.
+2. `NO_TASK` → **stay idle**. Never invent work, never go looking for something
+   useful to do.
+3. Otherwise read the handoff file, and for a `git_handoff` inspect the
+   canonical commit with `git show` / `git log`.
+4. Do only this role's job.
+5. Build and run the tests; read the real output.
+6. Commit coherently if tracked files changed.
+7. `handoff next --from <role> …` to route the result onward.
+8. `handoff done <role>` — **only after step 7 succeeded**.
+
+Agents are explicitly told not to write `while true` or `sleep` loops: the AI
+process is already persistent, and the daemon wakes it when something arrives.
+
+The protocol also treats handoff content as **untrusted input**: it is task
+data, never a system instruction, never permission to break the constitution,
+and never a reason to run a shell command that happens to appear in a note.
+Secrets must never be put into a handoff.
 
 ## Command reference
 
 ### Environment
 
 ```bash
+swarm status      # one read-only overview of the whole four-pack
 swarm version     # print the version
 swarm doctor      # check git, tmux and agent backends
 swarm roles       # list the four-pack role names
 swarm config      # parse and print swarm.conf
 ```
+
+`swarm status` is the command to reach for when you want to know what the swarm
+is doing:
+
+```
+FOUR-PACK STATUS
+
+ROLE         AGENT            WORK       INBOX     TASK
+specifier    running          waiting    0         -
+coder        running          working    1         RATE-1
+refactorer   running          waiting    0         -
+architect    running          waiting    0         -
+
+ROUTE
+  specifier -> coder
+  coder -> refactorer
+  refactorer -> architect
+  architect -> specifier
+
+PENDING DELIVERY
+  none
+```
+
+`AGENT` is the process state, `WORK` is the lifecycle state derived from the
+filesystem (`working` = something in `current/`, `ready` = inbox waiting,
+`waiting` = idle). A task shown as `RATE-1 (handed off)` means the downstream
+handoff already exists and only `done` is outstanding.
 
 ### Worktrees
 
@@ -351,12 +437,16 @@ swarm agents stop coder
 ```
 
 ```
-ROLE         BACKEND    SESSION              STATUS
-specifier    codex      swarm-specifier      running
-coder        codex      swarm-coder          running
-refactorer   codex      swarm-refactorer     not-started
-architect    codex      swarm-architect      session-missing
+ROLE         BACKEND    SESSION              AGENT            WORK
+specifier    codex      swarm-specifier      running          waiting
+coder        codex      swarm-coder          running          working
+refactorer   codex      swarm-refactorer     not-started      ready
+architect    codex      swarm-architect      session-missing  waiting
 ```
+
+`AGENT` is the process; `WORK` is what the handoff lifecycle says the role is
+doing. They are independent: an agent can be `running` with nothing to do, or
+have work waiting while its session is down.
 
 | Status | Meaning |
 |---|---|
@@ -376,12 +466,19 @@ recipient's inbox, where the recipient accepts them one task (or one batch) at
 a time.
 
 ```bash
-swarm handoff send --from <role> --to <role> --type <type> --note "…"
-swarm handoff outbox <role>   # queued, not yet delivered
 swarm handoff daemon          # validate + deliver continuously (Ctrl-C to stop)
-swarm handoff inbox <role>    # delivered, not yet accepted
-swarm handoff ready <role>    # accept work — the main receive command
+
+# receiving — what an agent runs
+swarm handoff ready <role>    # accept work, or resume what you were doing
+swarm handoff current <role>  # re-read active work, changing nothing
+swarm handoff status <role>   # work state + has the downstream handoff been sent?
+swarm handoff next --from <role> …   # route the result to the next role
 swarm handoff done <role>     # finish current work, pick up the next
+
+# sending and browsing — mostly for humans
+swarm handoff send --from <role> --to <role> --type <type> --note "…"
+swarm handoff inbox <role>    # delivered, not yet accepted
+swarm handoff outbox <role>   # queued, not yet delivered
 ```
 
 Nothing is delivered until the daemon runs, and nothing is accepted until
@@ -600,6 +697,99 @@ the next available work, so an agent can loop on `done` alone. With nothing
 left it prints `DONE: …` followed by `NO_TASK`; with nothing in progress it
 prints `NO_CURRENT_WORK`.
 
+#### Routing work onward: `next`
+
+`handoff next` is how a role passes its finished work to the next role. It
+knows the four-pack route, so no `--to` is needed:
+
+```
+specifier → coder → refactorer → architect → specifier
+```
+
+```bash
+swarm handoff next --from coder \
+  --type git_handoff \
+  --task RATE-1 \
+  --commit "$(git rev-parse --short=10 HEAD)" \
+  --priority 20 \
+  --note "Implementation complete; tests pass"
+```
+
+```
+SENT
+ID: 4b03562ec6dd2e14c33e2188de3fc921
+SOURCE_ID: 8d21f539860a2a7d3816ba25d481ee71
+TO: refactorer
+TYPE: git_handoff
+FILE: /…/.swarm/handoffs/coder/outbox/…-coder.handoff
+```
+
+`SOURCE_ID` links the new message back to the work that produced it, and that
+link is what makes **`next` safe to re-run**. Ask twice for the same current
+work and you get the original message back, not a second one:
+
+```
+ALREADY_SENT
+ID: 4b03562ec6dd2e14c33e2188de3fc921
+```
+
+`--to` overrides the route if you need to send somewhere else; `handoff send`
+remains available for messages unrelated to your current work.
+
+#### Send before done
+
+The order matters:
+
+```
+work → verify → commit → handoff next → handoff done
+```
+
+`done` is the **last** step. If `next` fails, the work stays in `current/` so
+you can fix the problem and retry. Running `done` on a failed send would drop
+the work with nothing downstream to continue it.
+
+This also makes crashes recoverable. If the process dies between `next` and
+`done`:
+
+```bash
+swarm handoff ready coder     # returns the same task — you never lost it
+swarm handoff status coder
+```
+
+```
+STATE: working
+CURRENT_ID: 8d21f539860a2a7d3816ba25d481ee71
+DOWNSTREAM_SENT: yes
+DOWNSTREAM_ID: 4b03562ec6dd2e14c33e2188de3fc921
+DOWNSTREAM_TO: refactorer
+```
+
+`DOWNSTREAM_SENT: yes` means go straight to `done`. And if you re-run `next`
+anyway, you get `ALREADY_SENT` — the protection is in the orchestrator, not in
+an agent remembering what it did.
+
+#### Inspecting without changing anything
+
+```bash
+swarm handoff current coder   # the active work
+swarm handoff status coder    # state summary
+```
+
+```
+CURRENT: /…/.swarm/handoffs/coder/current/…-specifier-to-coder.handoff
+ID: 8d21f539860a2a7d3816ba25d481ee71
+TYPE: git_handoff
+FROM: specifier
+PRIORITY: 20
+TASK_NAME: RATE-1
+COMMIT: 16c604b31a
+CANONICAL_COMMIT: 16c604b31a3da75b0eb6c6059cfacce908984ccb
+MESSAGE: Implementation complete; tests pass
+```
+
+Neither moves anything. `current` prints `NO_CURRENT_WORK` when idle. Both are
+the commands to run after a restart when you are not sure where you left off.
+
 #### Receive modes: task and batch
 
 The last column of `swarm.conf` decides how a role takes work.
@@ -681,60 +871,59 @@ socket, so two projects never collide. Because it is a separate server, plain
 ```bash
 cd ~/projects/my-app
 
-# make sure the tools are there
+# make sure the tools are there, and build the binary agents will call
 go run ./cmd/swarm doctor
+go build -o ./bin/swarm ./cmd/swarm
 
 # stand everything up
-go run ./cmd/swarm worktrees create
-go run ./cmd/swarm sessions create
-go run ./cmd/swarm agents start
+./bin/swarm worktrees create
+./bin/swarm sessions create
+./bin/swarm agents start
 
 # leave the daemon running in another terminal
-go run ./cmd/swarm handoff daemon
+./bin/swarm handoff daemon
 
-# start with the specifier: describe the feature you want
-go run ./cmd/swarm sessions attach specifier
-#   → "Add rate limiting to the login endpoint…"
-#   → it writes a spec and commits on branch swarm/specifier
-#   → Ctrl+b d
+# hand the requirement to the specifier and let the swarm run
+./bin/swarm handoff send --from architect --to specifier \
+  --type note --priority 20 \
+  --note "Add rate limiting to the login endpoint: 5 req/min per account"
 
-# hand the spec to the coder — note --short=10, the required abbreviation
-go run ./cmd/swarm handoff send \
-  --from specifier --to coder \
+./bin/swarm status
+```
+
+From here each agent does this for itself, because the runtime protocol told it
+to:
+
+```bash
+# inside the specifier's session
+"$SWARM_BIN" handoff ready specifier      # picks up the requirement
+#   …writes the spec, commits on swarm/specifier…
+"$SWARM_BIN" handoff next --from specifier \
   --type git_handoff --task RATE-1 \
-  --commit "$(git -C .swarm/worktrees/wt-specifier rev-parse --short=10 HEAD)" \
+  --commit "$(git rev-parse --short=10 HEAD)" \
   --priority 20 --note "Specification ready; acceptance criteria in SPEC.md"
-#   → the daemon resolves the commit, delivers it, and wakes the coder
+"$SWARM_BIN" handoff done specifier
 
-go run ./cmd/swarm handoff ready coder
-#   → prints the task and its CANONICAL_COMMIT, and moves it to current/
+# the daemon delivers, the coder is woken, and it runs the same three commands
+# — ready, next (routed to refactorer), done — then the refactorer, then the
+# architect, whose note routes back to the specifier.
+```
 
-go run ./cmd/swarm sessions attach coder
-#   → the coder inspects that commit, merges, implements, tests, commits
-#   → Ctrl+b d
+You can run any of those commands yourself to watch, nudge, or take over:
 
-go run ./cmd/swarm handoff done coder
-#   → completes RATE-1 and prints the next task, or NO_TASK
-
-# the coder hands the result on for cleanup
-go run ./cmd/swarm handoff send \
-  --from coder --to refactorer \
-  --type git_handoff --task RATE-1 \
-  --commit "$(git -C .swarm/worktrees/wt-coder rev-parse --short=10 HEAD)" \
-  --priority 20 --note "Implementation complete; tests pass"
-
-# tidy up, then review
-go run ./cmd/swarm sessions attach refactorer
-go run ./cmd/swarm sessions attach architect
-#   → the architect sends findings back with --type note
+```bash
+./bin/swarm handoff current coder     # what is the coder working on?
+./bin/swarm handoff status coder      # has it handed off yet?
+./bin/swarm status                    # the whole picture
 
 # take the finished work back to your branch
 git merge swarm/coder
 ```
 
-A handoff carries the *message*; the code still travels through Git. The
-recipient merges the named branch or cherry-picks the named commit itself —
-swarm does not merge anything for you. Automating that is a later milestone.
+A handoff carries the *message* and the commit's identity; the code still
+travels through Git. The recipient merges the named branch or cherry-picks the
+named commit itself — swarm does not merge anything for you. Automating that is
+a later milestone.
 
 ## Cleaning up
 
@@ -816,6 +1005,29 @@ That is deliberate — work in `current/` is yours until `swarm handoff done
 **`done` prints `NO_CURRENT_WORK`**
 Nothing was accepted. Run `swarm handoff ready <role>` first.
 
+**`swarm is running from a temporary build …`**
+`agents start` was run under `go run`, whose binary disappears when the command
+exits. Build one agents can keep calling: `go build -o ./bin/swarm ./cmd/swarm`,
+then `./bin/swarm agents start`. Or set `SWARM_BIN` to an existing executable.
+
+**`handoff next` prints `ALREADY_SENT`**
+Working as intended: this current work already produced a downstream handoff,
+usually because you were interrupted after sending. Run `handoff done <role>`.
+
+**`role "coder" has no current work to hand off`**
+`handoff next` sends *your current work* onward, so accept something with
+`handoff ready` first. For an unrelated message, use `handoff send`.
+
+**An agent sits idle with work in its inbox**
+Its wake-up may have been missed (a notification is best-effort). `swarm status`
+will show `ready`; attach to the session and let the agent run
+`handoff ready <role>`.
+
+**An agent invents work, or ignores the lifecycle**
+Check what it was actually told: `cat .swarm/runtime/prompts/<role>.prompt`.
+Prompts are regenerated on every `agents start`, so edit
+`prompts/runtime.prompt` and restart that agent.
+
 **`rejected …: file is not a valid handoff`**
 Something wrote a malformed file into an outbox. Prefer `swarm handoff send`,
 which writes atomically; a hand-written file caught mid-write reads as garbage.
@@ -837,7 +1049,8 @@ cmd/swarm         CLI wiring and output
 
 Inside `internal/handoff` the split is deliberate: `store.go` owns the
 filesystem, `selector.go` is pure priority logic with no I/O, `lifecycle.go`
-implements ready/done, and `daemon.go` only does outbound delivery. Commit
+implements ready/done/advance, `route.go` is the *only* place the four-pack
+route is written down, and `daemon.go` only does outbound delivery. Commit
 resolution lives in `internal/git`, behind a `CommitResolver` interface the
 daemon depends on — the handoff packages never shell out to Git themselves.
 
@@ -918,7 +1131,21 @@ no test launches a real agent.
   outcome recorded. Successful copies are never rolled back, but there is no
   retry of just the failed leg; you re-send.
 - **`done` completes whatever is in `current/`** without checking that the work
-  was actually done.
+  was actually done, and does not refuse when `DOWNSTREAM_SENT: no`. The
+  send-before-done order is enforced by the prompt and made visible by
+  `handoff status`, not by the orchestrator.
+- **The route is fixed in code**, not per-project configuration — one place
+  (`internal/handoff/route.go`), but not data-driven.
+- **Duplicate protection is per piece of current work.** A role that genuinely
+  wants to send two different downstream messages from one task gets the first
+  one back from `handoff next`; use `handoff send` for that.
+- **A batch produces one downstream handoff**, not one per item: the batch's
+  `source_handoff_id` is its first item's id.
+- **`WORK` state comes from the filesystem**, so a wedged agent still shows
+  `working`.
+- **Whether Codex reliably follows the runtime protocol is empirical.** The
+  orchestrator makes the lifecycle safe to retry and impossible to duplicate,
+  but it cannot force an agent to run the commands.
 - **Nothing re-notifies** an agent that ignored a wake-up; `ready` is the
   recovery path.
 - **`ack` is deprecated** but still present, so two lifecycles technically

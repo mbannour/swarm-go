@@ -17,12 +17,19 @@ const Dir = "prompts"
 type PromptSet struct {
 	Role         string
 	Constitution string
+	Runtime      string
 	Instructions string
 }
 
 // ConstitutionPath returns the repository-relative path of the shared prompt.
 func ConstitutionPath() string {
 	return Dir + "/constitution.prompt"
+}
+
+// RuntimePath returns the repository-relative path of the shared handoff
+// protocol. It is written once here rather than copied into each role prompt.
+func RuntimePath() string {
+	return Dir + "/runtime.prompt"
 }
 
 // RolePath returns the repository-relative path of a role's prompt.
@@ -54,12 +61,22 @@ func LoadForRole(root, role string) (PromptSet, error) {
 		return PromptSet{}, err
 	}
 
+	runtime, err := readPrompt(root, RuntimePath())
+	if err != nil {
+		return PromptSet{}, err
+	}
+
 	instructions, err := readPrompt(root, RolePath(role))
 	if err != nil {
 		return PromptSet{}, err
 	}
 
-	return PromptSet{Role: role, Constitution: constitution, Instructions: instructions}, nil
+	return PromptSet{
+		Role:         role,
+		Constitution: constitution,
+		Runtime:      runtime,
+		Instructions: instructions,
+	}, nil
 }
 
 // readPrompt reads one prompt file, reporting the relative path on failure.

@@ -1,2 +1,5 @@
-# Managed swarm state: worktrees and generated runtime prompts.
+# Managed swarm state: worktrees, generated runtime prompts, handoffs.
 .swarm/
+
+# The stable orchestrator binary agents invoke (go build -o ./bin/swarm ./cmd/swarm).
+bin/

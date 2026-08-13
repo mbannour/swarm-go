@@ -84,6 +84,111 @@ func (l *Lifecycle) Ready(role string) (Selection, error) {
 	return selection, nil
 }
 
+// SourceID identifies the work a role is currently doing. For a batch it is
+// the first item's id, which is stable because the batch is ordered.
+func (l *Lifecycle) SourceID(role string) (string, error) {
+	current, err := l.Store.Current(role)
+	if err != nil {
+		return "", err
+	}
+	if len(current) == 0 {
+		return "", nil
+	}
+
+	SortEntries(current)
+
+	return current[0].ID, nil
+}
+
+// Advance creates the downstream handoff for a role's current work.
+//
+// It is idempotent per piece of current work: if this role already produced a
+// message from the same source, that message is returned and nothing new is
+// created. That is what makes a crash between "send" and "done" safe — the
+// agent re-runs the same command after restart and gets the original handoff
+// back instead of a duplicate.
+func (l *Lifecycle) Advance(role string, h Handoff) (entry Entry, already bool, err error) {
+	sourceID, err := l.SourceID(role)
+	if err != nil {
+		return Entry{}, false, err
+	}
+	if sourceID == "" {
+		return Entry{}, false, fmt.Errorf("role %q has no current work to hand off", role)
+	}
+
+	existing, err := l.Store.FindBySource(role, sourceID)
+	if err != nil {
+		return Entry{}, false, err
+	}
+	if len(existing) > 0 {
+		return existing[0], true, nil
+	}
+
+	h.From = role
+	h.SourceID = sourceID
+
+	entry, err = l.Store.Send(h)
+	if err != nil {
+		return Entry{}, false, err
+	}
+
+	return entry, false, nil
+}
+
+// Status is a read-only snapshot of one role's work state.
+type Status struct {
+	Role           string
+	Mode           ReceiveMode
+	Current        []Entry
+	Inbox          int
+	Downstream     []Entry // messages already produced from the current work
+	DownstreamSent bool
+}
+
+// State is the coarse work state used by `agents list` and `status`.
+func (s Status) State() string {
+	switch {
+	case len(s.Current) > 0:
+		return "working"
+	case s.Inbox > 0:
+		return "ready"
+	default:
+		return "waiting"
+	}
+}
+
+// Status inspects a role without changing anything.
+func (l *Lifecycle) Status(role string) (Status, error) {
+	mode, err := l.Mode(role)
+	if err != nil {
+		return Status{}, err
+	}
+
+	current, err := l.Store.Current(role)
+	if err != nil {
+		return Status{}, err
+	}
+	SortEntries(current)
+
+	inbox, err := l.Store.Inbox(role)
+	if err != nil {
+		return Status{}, err
+	}
+
+	status := Status{Role: role, Mode: mode, Current: current, Inbox: len(inbox)}
+
+	if len(current) > 0 {
+		downstream, err := l.Store.FindBySource(role, current[0].ID)
+		if err != nil {
+			return Status{}, err
+		}
+		status.Downstream = downstream
+		status.DownstreamSent = len(downstream) > 0
+	}
+
+	return status, nil
+}
+
 // Done moves everything in current/ to completed/ and then looks for the next
 // available work, so an agent can loop on `done` alone.
 func (l *Lifecycle) Done(role string) (finished []Entry, next Selection, err error) {
