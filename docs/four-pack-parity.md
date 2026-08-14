@@ -132,7 +132,11 @@ RUN_REAL_CODEX_TESTS=1 ./scripts/real-codex-smoke.sh   # opt-in, costs model quo
 ### Real four-pack E2E
 | | Feature | Evidence |
 |---|---|---|
-| ☐ | Full real cycle through architect and back | pending — see gaps |
+| ✓ | Full real cycle: specifier → coder → refactorer → architect → specifier | **REAL** `scripts/real-fourpack-e2e.sh` — 20/20 checks, 291s |
+| ✓ | Every hop unattended, no manual input anywhere | **REAL** — each hop is a bounded wait that fails on stall |
+| ✓ | Handed-off commit integrated by the receiver | **REAL** — `METHOD: fast-forward` in the trace |
+| ✓ | Each role does its own job, not another's | **REAL** — refactorer declined to refactor, architect declined to code |
+| ✓ | Clean queues, real commits, implementation in history | **REAL** — assertions in the script |
 
 ## Gaps
 
@@ -143,7 +147,7 @@ Ordered roughly by how much they matter.
 | ☐ | **Final merge to the base branch is manual** | Role branches converge role-to-role, and the accepted result ends on the specifier's branch. Nothing moves it to `main`: `swarm task merge` was deliberately not built, so releasing stays a human step. Merge it yourself with ordinary Git. |
 | ☐ | **Multi-commit handoffs are not supported** | A `git_handoff` names exactly one commit. A range would be a separate, explicit feature. |
 | ☐ | **Conflicts need a human** | By design: the cherry-pick aborts, `doctor` reports `INTEGRATION_FAILED`, and repair never resolves it. |
-| ~ | **Real-agent behavior: partially proven** | A real Codex run confirmed agents read the runtime protocol and follow it unprompted — `ready` → work → `next` → `done`, producing a real commit with passing tests and a well-formed `git_handoff`. It also exposed three orchestrator bugs: `task submit` woke nobody, wake-ups were typed but never submitted, and Codex's own trust/approval prompts gate a first run. The first two are fixed; the third is the operator's call. Not yet a repeatable automated test. |
+| ✓ | **Real-agent behavior: proven** | The full cycle runs unattended with real Codex (`scripts/real-fourpack-e2e.sh`). Five orchestrator bugs were found by running it and are now fixed and frozen as regression tests: `task submit` woke nobody; wake-ups were typed but never submitted; a linked worktree resolved the wrong repository root; sandboxed agents could not reach their toolchain caches; and `.git` was read-only under `workspace-write`, which is why unattended commits need the explicit `trusted` policy. |
 | ☐ | **`done` does not enforce send-before-done** | The prompt and `handoff status` make the ordering visible, but an agent can still call `done` with `DOWNSTREAM_SENT: no` and drop the work. |
 | ☐ | **Route is code, not configuration** | `internal/handoff/route.go` is the single source, but per-project routes are not configurable. SwarmForge's two-pack and six-pack shapes are therefore out of reach. |
 | ☐ | **Batch handoffs collapse to one downstream message** | A batch's `source_handoff_id` is its first item's id, so a batch produces one downstream handoff rather than one per item. |

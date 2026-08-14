@@ -1613,6 +1613,18 @@ no current work is stuck, no handoff id is duplicated, and the implementation
 actually landed. It also covers a restart during active work and a crash between
 `handoff next` and `handoff done`.
 
+There are two real-agent gates as well, both opt-in because they cost model
+quota:
+
+```bash
+RUN_REAL_CODEX_TESTS=1 ./scripts/real-codex-smoke.sh      # submit → specifier → coder → refactorer
+RUN_REAL_CODEX_TESTS=1 ./scripts/real-fourpack-e2e.sh     # the whole cycle, back to the specifier
+```
+
+Both prove the swarm runs with **no human input after `task submit`** — no
+typing into tmux, no Enter, no approval prompts, no hand-written handoffs. Each
+hop is a bounded wait that fails with diagnostics if an agent stalls.
+
 `./scripts/e2e-fourpack.sh` does the same at the CLI level with **real tmux
 sessions, a real background daemon and a real `swarm start`**, using a fake
 agent binary (`scripts/fake-agent.sh`) that drives the same commands the runtime
