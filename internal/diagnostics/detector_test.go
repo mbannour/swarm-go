@@ -36,6 +36,7 @@ type fakeSystem struct {
 	pending     map[string]int
 	orphans     []Orphan
 	tempFiles   []string
+	integration map[string][2]string // role -> {status, reason}
 }
 
 func newFakeSystem() *fakeSystem {
@@ -53,6 +54,7 @@ func newFakeSystem() *fakeSystem {
 		worktreeErr: map[string]error{}, sessions: map[string]bool{},
 		agents: map[string]string{}, backends: map[string]bool{"codex": true},
 		current: map[string]int{}, failed: map[string]int{}, pending: map[string]int{},
+		integration: map[string][2]string{},
 	}
 
 	for _, r := range roles {
@@ -115,6 +117,11 @@ func (s *fakeSystem) RejectedCount() (int, error)            { return s.rejected
 func (s *fakeSystem) PendingOutbox(role string) (int, error) { return s.pending[role], nil }
 func (s *fakeSystem) Orphans() ([]Orphan, error)             { return s.orphans, nil }
 func (s *fakeSystem) StaleTempFiles() ([]string, error)      { return s.tempFiles, nil }
+
+func (s *fakeSystem) IntegrationState(role string) (string, string, error) {
+	state := s.integration[role]
+	return state[0], state[1], nil
+}
 
 // find returns the first diagnostic with a code, or false.
 func find(report Report, code string) (Diagnostic, bool) {
@@ -527,5 +534,43 @@ func TestDiagnosticsAreSortedBySeverity(t *testing.T) {
 		if rank[report.Diagnostics[i-1].Severity] > rank[report.Diagnostics[i].Severity] {
 			t.Fatalf("diagnostics are not sorted worst-first: %+v", report.Diagnostics)
 		}
+	}
+}
+
+// A handed-off commit that has not been applied yet is repairable work.
+func TestPendingIntegrationIsDetected(t *testing.T) {
+	s := newFakeSystem()
+	s.integration["refactorer"] = [2]string{"pending", ""}
+
+	report := Detect(s)
+
+	d, ok := find(report, CodeIntegrationPend)
+	if !ok {
+		t.Fatalf("pending integration not detected: %+v", report.Diagnostics)
+	}
+	if d.Component != "refactorer" || !d.Repairable {
+		t.Errorf("diagnostic = %+v", d)
+	}
+}
+
+// A conflict is never something repair should resolve.
+func TestFailedIntegrationIsBlocking(t *testing.T) {
+	s := newFakeSystem()
+	s.integration["refactorer"] = [2]string{"failed", "cherry-pick conflict: shared.txt"}
+
+	report := Detect(s)
+
+	d, ok := find(report, CodeIntegrationFail)
+	if !ok {
+		t.Fatalf("failed integration not detected: %+v", report.Diagnostics)
+	}
+	if d.Repairable {
+		t.Fatal("a conflicted integration was marked repairable")
+	}
+	if report.Health != HealthBlocked {
+		t.Errorf("health = %q, want blocked", report.Health)
+	}
+	if d.Detail["reason"] == "" {
+		t.Error("the conflict reason was not carried through")
 	}
 }

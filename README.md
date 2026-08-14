@@ -24,6 +24,7 @@ Clojure, no shell orchestration: one static binary and the standard library.
   - [Submitting work: `task`](#submitting-work-task)
   - [Lifecycle: `start`, `status`, `stop`](#lifecycle-start-status-stop)
   - [Handoffs](#handoffs)
+  - [Getting the code: `integrate`](#getting-the-code-integrate)
   - [Routing work onward: `next`](#routing-work-onward-next)
   - [Send before done](#send-before-done)
 - [tmux crash course](#tmux-crash-course)
@@ -987,6 +988,71 @@ the next available work, so an agent can loop on `done` alone. With nothing
 left it prints `DONE: …` followed by `NO_TASK`; with nothing in progress it
 prints `NO_CURRENT_WORK`.
 
+#### Getting the code: `integrate`
+
+A `git_handoff` names a commit; it does not put that commit's files in the
+receiver's worktree. `integrate` does:
+
+```bash
+swarm handoff integrate refactorer
+```
+
+```
+INTEGRATED
+ROLE: refactorer
+COMMIT: 7272a43bd9128b7b08026269ff2f9eddad5c5af6
+LOCAL_COMMIT: 7272a43bd9128b7b08026269ff2f9eddad5c5af6
+METHOD: fast-forward
+```
+
+The strategy is deliberately boring:
+
+1. **already present** → nothing to do (`ALREADY_INTEGRATED`);
+2. **history is linear** → `git merge --ff-only`, which keeps the SHA identical;
+3. **branches diverged** → `git cherry-pick`, which rewrites the commit onto
+   this branch and therefore produces a *different* `LOCAL_COMMIT`.
+
+No merge commits, no rebase, and never `reset --hard`.
+
+Both identities are recorded, so a rewritten commit is always traceable back to
+its source:
+
+```
+$ swarm task trace INT-2
+specifier -> architect
+  SOURCE_COMMIT: 5a14da9c62d3f1633308882b77f0ca05c5922305
+  INTEGRATION: integrated
+  METHOD: cherry-pick
+  LOCAL_COMMIT: b8d6a027f118a36e8c1be6bca665a93502dc2b17
+```
+
+It is safe to re-run. Idempotency is by *patch equivalence*, not just ancestry —
+after a cherry-pick the original SHA is no longer an ancestor, so ancestry alone
+would happily apply the same change twice.
+
+**What it refuses:**
+
+- a **dirty worktree** — commit or stash first; nothing is stashed or discarded
+  for you;
+- the **wrong branch** — a role integrates only into its own `swarm/<role>`;
+- a **conflict** — the cherry-pick is aborted, the worktree is left exactly as
+  it was, and you get:
+
+```
+INTEGRATION_CONFLICT
+ROLE: architect
+COMMIT: f638d3d5f2a95fd2f571b1036c2f8a24c5c88d3b
+CONFLICTED_FILE: impl.txt
+STATE: cherry-pick aborted; the worktree is unchanged
+```
+
+The work stays `current`, `doctor` reports `INTEGRATION_FAILED`, and `repair`
+will not touch it. Resolve it yourself, or send a note back upstream.
+
+Agents run this automatically: the runtime protocol puts `integrate` between
+`ready` and doing any work, and `doctor` reports `INTEGRATION_PENDING` for a
+git_handoff whose commit has not been applied.
+
 #### Routing work onward: `next`
 
 `handoff next` is how a role passes its finished work to the next role. It
@@ -1547,11 +1613,12 @@ proves it; everything else is listed as a gap, however finished the code looks.
   anything left in an outbox is delivered on the next start.
 - **Health is coarse** (`stopped`/`healthy`/`degraded`/`failed`) with no
   per-component reason in the JSON.
-- **Handoffs carry Git identity, not code.** The commit is verified and passed
-  on, but each role's worktree stays on its own branch — the receiver does
-  **not** get the sender's files until someone merges or cherry-picks. The
-  acceptance run shows this plainly as four sibling branches. Automatic
-  materialisation is the next milestone.
+- **The final merge to your base branch is manual.** Work converges
+  role-to-role and ends on the specifier's branch; nothing pushes it to `main`.
+  Merge it yourself when you are happy with it.
+- **A `git_handoff` carries exactly one commit.** Ranges are not supported.
+- **Conflicts stop the line.** The cherry-pick aborts, `doctor` reports
+  `INTEGRATION_FAILED`, and nothing resolves it for you — deliberately.
 - **Real-agent behavior is unproven.** Every test uses deterministic fake
   agents, which proves the orchestrator, not that Codex follows the protocol.
 - **A multi-destination message has one shared fate for its source file** —

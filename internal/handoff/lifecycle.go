@@ -218,3 +218,86 @@ func (l *Lifecycle) Done(role string) (finished []Entry, next Selection, err err
 
 	return finished, next, nil
 }
+
+// Integrator applies a handed-off commit to a receiving worktree. The git
+// package supplies the implementation; this package stays free of Git commands.
+type Integrator interface {
+	// Integrate brings commit into the worktree on expectedBranch, returning
+	// how it was applied and what the state is called locally.
+	Integrate(worktree, expectedBranch, commit string) (method, localCommit string, already bool, err error)
+}
+
+// IntegrationResult is what Integrate did.
+type IntegrationResult struct {
+	Entry        Entry
+	Required     bool   // false for notes, which carry no repository state
+	Already      bool   // the commit was present before this call
+	Method       string // fast-forward | cherry-pick | none
+	SourceCommit string
+	LocalCommit  string
+}
+
+// Integrate applies the commit named by a role's current work to that role's
+// worktree, and records the outcome against the handoff.
+//
+// It is idempotent: a commit already contained in the receiving branch is
+// reported as already integrated and applied no second time. On failure the
+// handoff is marked failed and stays current, so the work is never marked done
+// on top of state that was never applied.
+func (l *Lifecycle) Integrate(role, worktree, branch string, integrator Integrator) (IntegrationResult, error) {
+	current, err := l.Store.Current(role)
+	if err != nil {
+		return IntegrationResult{}, err
+	}
+	if len(current) == 0 {
+		return IntegrationResult{}, fmt.Errorf("role %q has no current work to integrate", role)
+	}
+
+	SortEntries(current)
+	entry := current[0]
+
+	// A note carries no repository state.
+	if entry.Type != TypeGit {
+		return IntegrationResult{Entry: entry, Required: false}, nil
+	}
+	if entry.CanonicalCommit == "" {
+		return IntegrationResult{}, fmt.Errorf(
+			"handoff %s is a git_handoff with no canonical commit; it was never resolved", short(entry.ID))
+	}
+
+	method, local, already, err := integrator.Integrate(worktree, branch, entry.CanonicalCommit)
+	if err != nil {
+		// Record the failure durably so `doctor` can see it and the agent
+		// cannot mistake unintegrated work for integrated work.
+		entry.IntegrationStatus = IntegrationFailed
+		entry.IntegrationError = err.Error()
+		entry.IntegratedAt = l.Store.Now().UTC()
+		if updateErr := l.Store.UpdateEntry(entry); updateErr != nil {
+			return IntegrationResult{}, updateErr
+		}
+		return IntegrationResult{Entry: entry, Required: true}, err
+	}
+
+	entry.IntegrationStatus = IntegrationDone
+	entry.IntegrationMethod = method
+	entry.LocalCommit = local
+	entry.IntegratedAt = l.Store.Now().UTC()
+	entry.IntegrationError = ""
+
+	if err := l.Store.UpdateEntry(entry); err != nil {
+		return IntegrationResult{}, err
+	}
+
+	return IntegrationResult{
+		Entry: entry, Required: true, Already: already,
+		Method: method, SourceCommit: entry.CanonicalCommit, LocalCommit: local,
+	}, nil
+}
+
+// short abbreviates an id for messages.
+func short(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}

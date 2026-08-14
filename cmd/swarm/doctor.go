@@ -22,10 +22,13 @@ func newInspector() *lifecycle.Inspector {
 	store := handoff.NewStore(wtMgr.Root, handoff.NewRoles(configuredRoles(cfg)))
 
 	return &lifecycle.Inspector{
-		Mgr:      mgr,
-		Git:      lifecycle.GitInspection{Mgr: wtMgr},
-		Handoffs: lifecycle.HandoffInspection{Store: store},
-		Tmux:     lifecycle.TmuxInspection{Mgr: tmux.NewManager(wtMgr.Root)},
+		Mgr: mgr,
+		Git: lifecycle.GitInspection{Mgr: wtMgr},
+		Handoffs: lifecycle.HandoffInspection{
+			Store: store,
+			Life:  handoff.NewLifecycle(store, receiveModeLookup(cfg)),
+		},
+		Tmux: lifecycle.TmuxInspection{Mgr: tmux.NewManager(wtMgr.Root)},
 	}
 }
 

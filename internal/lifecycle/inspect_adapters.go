@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,7 @@ func (g GitInspection) Prune() error { return g.Mgr.PruneManaged() }
 // HandoffInspection answers durable-state questions.
 type HandoffInspection struct {
 	Store *handoff.Store
+	Life  *handoff.Lifecycle
 }
 
 func (h HandoffInspection) CurrentCount(role string) (int, error) {
@@ -163,6 +165,54 @@ func (h HandoffInspection) Reconcile(role, id string) error {
 	}
 
 	return nil // already reconciled
+}
+
+// IntegrationState reports the integration status of a role's current work.
+func (h HandoffInspection) IntegrationState(role string) (string, string, error) {
+	entries, err := h.Store.List(role, handoff.BoxCurrent)
+	if err != nil || len(entries) == 0 {
+		return "", "", err
+	}
+
+	handoff.SortEntries(entries)
+	current := entries[0]
+
+	if current.Type != handoff.TypeGit || current.CanonicalCommit == "" {
+		return "", "", nil
+	}
+
+	switch current.IntegrationStatus {
+	case handoff.IntegrationDone:
+		return "", "", nil
+	case handoff.IntegrationFailed:
+		return "failed", current.IntegrationError, nil
+	default:
+		return "pending", "", nil
+	}
+}
+
+// Integrate applies a role's current handed-off commit to its worktree.
+func (h HandoffInspection) Integrate(role, worktree, branch string) error {
+	if h.Life == nil {
+		return fmt.Errorf("no handoff lifecycle configured")
+	}
+
+	_, err := h.Life.Integrate(role, worktree, branch, gitIntegratorAdapter{git.NewIntegrator()})
+
+	return err
+}
+
+// gitIntegratorAdapter bridges the git integrator to the handoff interface.
+type gitIntegratorAdapter struct {
+	integrator *git.Integrator
+}
+
+func (g gitIntegratorAdapter) Integrate(worktree, branch, commit string) (string, string, bool, error) {
+	result, err := g.integrator.Integrate(worktree, branch, commit)
+	if err != nil {
+		return "", "", false, err
+	}
+	return result.Method, result.LocalCommit, result.Already, nil
 }
 
 // TmuxInspection answers questions about the project's tmux server.

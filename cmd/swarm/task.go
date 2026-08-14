@@ -110,7 +110,17 @@ func taskTrace(store *handoff.Store, args []string) error {
 		fmt.Printf("  TYPE: %s\n", e.Type)
 		fmt.Printf("  STATE: %s\n", e.Box)
 		if e.CanonicalCommit != "" {
-			fmt.Printf("  COMMIT: %s\n", e.CanonicalCommit)
+			fmt.Printf("  SOURCE_COMMIT: %s\n", e.CanonicalCommit)
+		}
+		if e.IntegrationStatus != "" {
+			fmt.Printf("  INTEGRATION: %s\n", e.IntegrationStatus)
+		}
+		if e.IntegrationMethod != "" {
+			fmt.Printf("  METHOD: %s\n", e.IntegrationMethod)
+		}
+		// A cherry-pick rewrites the commit; never hide that.
+		if e.LocalCommit != "" && e.LocalCommit != e.CanonicalCommit {
+			fmt.Printf("  LOCAL_COMMIT: %s\n", e.LocalCommit)
 		}
 		if e.Note != "" {
 			fmt.Printf("  NOTE: %s\n", firstLine(e.Note))

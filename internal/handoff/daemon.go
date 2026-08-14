@@ -243,11 +243,3 @@ func (d *Daemon) logf(format string, args ...interface{}) {
 	}
 	fmt.Fprintf(d.Log, "%s  %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
 }
-
-// short abbreviates an id for logging.
-func short(id string) string {
-	if len(id) <= 8 {
-		return id
-	}
-	return id[:8]
-}

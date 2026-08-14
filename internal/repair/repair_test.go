@@ -35,6 +35,7 @@ func (f *fakeActuator) PruneWorktrees() error            { return f.record("prun
 func (f *fakeActuator) ReconcileOrphan(role, id string) error {
 	return f.record("reconcile:" + role + ":" + id)
 }
+func (f *fakeActuator) Integrate(role string) error { return f.record("integrate:" + role) }
 func (f *fakeActuator) CleanTempFiles() (int, error) {
 	return f.tempN, f.record("clean-temp")
 }
@@ -252,4 +253,45 @@ func TestPlanIsDeterministic(t *testing.T) {
 			t.Fatalf("plans differ at %d: %+v vs %+v", i, a, b)
 		}
 	}
+}
+
+func TestPlanIntegratesPendingCommits(t *testing.T) {
+	actuator := newFakeActuator()
+	executor := &Executor{Actuator: actuator, Log: io.Discard}
+
+	plan := PlanFrom(report(repairable(diagnostics.CodeIntegrationPend, "refactorer")))
+
+	if !hasKind(plan, KindIntegrate) {
+		t.Fatalf("plan does not integrate: %+v", plan.Actions)
+	}
+
+	executor.Execute(plan, false)
+
+	if len(actuator.calls) != 1 || actuator.calls[0] != "integrate:refactorer" {
+		t.Errorf("calls = %v", actuator.calls)
+	}
+}
+
+// A failed integration is a conflict; repair must not touch it.
+func TestPlanNeverRetriesFailedIntegration(t *testing.T) {
+	plan := PlanFrom(report(diagnostics.Diagnostic{
+		Code: diagnostics.CodeIntegrationFail, Component: "refactorer",
+		Severity: diagnostics.SeverityError, Repairable: false,
+	}))
+
+	if !plan.Empty() {
+		t.Errorf("plan acts on a conflicted integration: %+v", plan.Actions)
+	}
+	if len(plan.Blocked) != 1 {
+		t.Errorf("the conflict was not reported as blocking: %+v", plan.Blocked)
+	}
+}
+
+func hasKind(plan Plan, kind Kind) bool {
+	for _, a := range plan.Actions {
+		if a.Kind == kind {
+			return true
+		}
+	}
+	return false
 }

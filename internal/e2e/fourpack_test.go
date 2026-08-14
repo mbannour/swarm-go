@@ -115,12 +115,68 @@ func TestFourPackEndToEnd(t *testing.T) {
 	final.done()
 
 	// ---- final assertions ------------------------------------------------
+	assertIntegrationHappened(t, s)
 	assertNoStuckWork(t, s)
 	assertQueuesClean(t, s)
 	assertCompletedCounts(t, s)
 	assertWorktreeIsolation(t, s)
 	assertImplementationLanded(t, s)
 	assertTraceable(t, s)
+}
+
+// assertIntegrationHappened proves the handed-off commits were really applied
+// to each receiver's worktree, not merely named.
+func assertIntegrationHappened(t *testing.T, s *swarm) {
+	t.Helper()
+
+	for _, role := range []string{"coder", "refactorer", "architect"} {
+		completed := s.completed(role)
+		if len(completed) == 0 {
+			continue
+		}
+
+		for _, e := range completed {
+			if e.Type != handoff.TypeGit {
+				continue
+			}
+
+			if e.IntegrationStatus != handoff.IntegrationDone {
+				t.Errorf("%s completed a git_handoff with integration status %q",
+					role, e.IntegrationStatus)
+			}
+			if e.LocalCommit == "" {
+				t.Errorf("%s recorded no local commit for %s", role, e.CanonicalCommit)
+			}
+
+			// A fast-forward keeps the SHA; a cherry-pick rewrites it. Either
+			// way the local commit must exist in this role's own branch.
+			out, err := gitQuiet(s.trees[role], "merge-base", "--is-ancestor", e.LocalCommit, "HEAD")
+			if err != nil {
+				t.Errorf("%s: local commit %s is not in its branch: %v\n%s",
+					role, e.LocalCommit, err, out)
+			}
+
+			switch e.IntegrationMethod {
+			case "fast-forward":
+				if e.LocalCommit != e.CanonicalCommit {
+					t.Errorf("%s: a fast-forward changed the SHA: %s -> %s",
+						role, e.CanonicalCommit, e.LocalCommit)
+				}
+			case "cherry-pick":
+				if e.LocalCommit == e.CanonicalCommit {
+					t.Errorf("%s: a cherry-pick kept the source SHA", role)
+				}
+			}
+		}
+	}
+
+	// The upstream file really is present downstream, which is the whole point.
+	if _, err := gitQuiet(s.trees["refactorer"], "cat-file", "-e", "HEAD:demo/calculator/SPEC.md"); err != nil {
+		t.Errorf("the specifier's file never reached the refactorer's branch: %v", err)
+	}
+	if _, err := gitQuiet(s.trees["architect"], "cat-file", "-e", "HEAD:demo/calculator/calculator.go"); err != nil {
+		t.Errorf("the coder's implementation never reached the architect's branch: %v", err)
+	}
 }
 
 // assertNoStuckWork checks that nothing was left half-processed.

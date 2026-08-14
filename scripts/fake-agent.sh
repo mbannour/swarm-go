@@ -123,17 +123,9 @@ TEST
         ;;
 
     refactorer)
-        # Note: this role's worktree is on its own branch, so it does not
-        # contain the coder's files. Materialising a handed-off commit across
-        # worktrees is not implemented yet (see docs/four-pack-parity.md), so
-        # the refactorer records its review of the commit it inspected.
+        # The handed-off commit has been integrated by now, so the coder's
+        # files really are here to refactor.
         mkdir -p demo/calculator
-        cat >demo/calculator/REFACTOR.md <<'NOTE'
-# Refactoring pass
-
-Reviewed the handed-off commit. Extracted discount validation into a helper
-and expressed the discount as a multiplier; behavior unchanged, tests green.
-NOTE
         if [ -f demo/calculator/calculator.go ]; then
             cat >demo/calculator/calculator.go <<'IMPL'
 package calculator
@@ -196,10 +188,19 @@ work_once() {
 
     log "accepted $(printf '%s' "$ready" | value_of ID)"
 
-    # A git_handoff names a commit: inspect it rather than assuming.
+    # A git_handoff names a commit: inspect it, then apply it to this
+    # worktree. Skipping this would mean working on state we never received.
     commit="$(printf '%s' "$ready" | value_of CANONICAL_COMMIT)"
     if [ -n "$commit" ]; then
         git log -1 --oneline "$commit" >/dev/null 2>&1 && log "inspected commit $commit"
+
+        integration="$("$SWARM_BIN" handoff integrate "$ROLE" 2>&1)"
+        if printf '%s' "$integration" | grep -q '^INTEGRATION_CONFLICT'; then
+            log "integration conflict; leaving work current for a human"
+            printf '%s\n' "$integration"
+            return 0
+        fi
+        log "integration: $(printf '%s' "$integration" | head -1) via $(printf '%s' "$integration" | value_of METHOD)"
     fi
 
     do_work

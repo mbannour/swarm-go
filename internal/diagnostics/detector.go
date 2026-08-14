@@ -69,6 +69,9 @@ type System interface {
 	AgentState(role string) (string, error)
 	BackendAvailable(backend string) bool
 
+	// Integration state of a role's current work.
+	IntegrationState(role string) (status, reason string, err error)
+
 	// Handoff daemon and locks.
 	DaemonState() (state string, pid int, err error)
 	DaemonPIDFilePresent() bool
@@ -379,6 +382,28 @@ func inspectWork(s System, role Role) []Diagnostic {
 			Repairable: false,
 			Detail:     map[string]string{"count": fmt.Sprint(current)},
 		})
+	}
+
+	// A git_handoff whose commit has not been applied is work the role cannot
+	// legitimately act on yet.
+	if status, reason, err := s.IntegrationState(role.Name); err == nil {
+		switch status {
+		case "pending":
+			out = append(out, Diagnostic{
+				Code: CodeIntegrationPend, Severity: SeverityWarning, Component: role.Name,
+				Message: "current work carries a commit that has not been integrated yet; " +
+					"run `swarm handoff integrate " + role.Name + "`",
+				Repairable: true,
+			})
+		case "failed":
+			// A conflict is a human's problem: repair must never resolve it.
+			out = append(out, Diagnostic{
+				Code: CodeIntegrationFail, Severity: SeverityError, Component: role.Name,
+				Message:    "integrating the handed-off commit failed: " + reason,
+				Repairable: false,
+				Detail:     map[string]string{"reason": reason},
+			})
+		}
 	}
 
 	if n, err := s.FailedCount(role.Name); err == nil && n > 0 {

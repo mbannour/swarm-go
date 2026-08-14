@@ -44,6 +44,8 @@ type HandoffInspector interface {
 	PendingOutbox(role string) (int, error)
 	Orphans(roles []string) ([]diagnostics.Orphan, error)
 	Reconcile(role, id string) error
+	IntegrationState(role string) (status, reason string, err error)
+	Integrate(role, worktree, branch string) error
 }
 
 // TmuxInspector answers questions about the tmux server itself.
@@ -353,4 +355,31 @@ var (
 var handoffBoxes = []string{
 	handoff.BoxInbox, handoff.BoxOutbox, handoff.BoxSent,
 	handoff.BoxFailed, handoff.BoxCurrent, handoff.BoxCompleted,
+}
+
+// IntegrationState reports whether a role's current work still needs its
+// handed-off commit applied.
+func (i *Inspector) IntegrationState(role string) (string, string, error) {
+	if i.Handoffs == nil {
+		return "", "", nil
+	}
+	return i.Handoffs.IntegrationState(role)
+}
+
+// Integrate applies a role's pending handed-off commit to its worktree.
+//
+// A conflict is never resolved here: the underlying integrator aborts the
+// cherry-pick and the error is surfaced, so `repair` reports rather than
+// improvises.
+func (i *Inspector) Integrate(role string) error {
+	if i.Handoffs == nil {
+		return nil
+	}
+
+	r, err := i.role(role)
+	if err != nil {
+		return err
+	}
+
+	return i.Handoffs.Integrate(role, r.Worktree, r.Branch)
 }

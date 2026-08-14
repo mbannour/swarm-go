@@ -128,6 +128,7 @@ func printUsage() {
   swarm handoff inbox <role>
   swarm handoff outbox <role>
   swarm handoff ready <role>
+  swarm handoff integrate <role>
   swarm handoff current <role>
   swarm handoff status <role>
   swarm handoff next --from <role> [...]

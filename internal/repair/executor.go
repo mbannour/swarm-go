@@ -20,6 +20,9 @@ type Actuator interface {
 	// without redelivering it.
 	ReconcileOrphan(role, id string) error
 	CleanTempFiles() (int, error)
+	// Integrate applies a role's pending handed-off commit. It must never
+	// resolve a conflict: a failure is reported, not worked around.
+	Integrate(role string) error
 }
 
 // Result is the outcome of one action.
@@ -111,6 +114,9 @@ func (e *Executor) perform(a Action) (string, error) {
 			return "", fmt.Errorf("orphan diagnostic carries no handoff id")
 		}
 		return "", e.Actuator.ReconcileOrphan(a.Component, id)
+
+	case KindIntegrate:
+		return "", e.Actuator.Integrate(a.Component)
 
 	case KindCleanTempFiles:
 		n, err := e.Actuator.CleanTempFiles()

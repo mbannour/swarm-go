@@ -46,6 +46,8 @@ const (
 	CodeOrphanDelivery   = "HANDOFF_ORPHAN_DELIVERY"
 	CodeNotifyFailed     = "DELIVERY_NOTIFICATION_FAILED"
 	CodeTempFiles        = "RUNTIME_TEMP_FILES"
+	CodeIntegrationPend  = "INTEGRATION_PENDING"
+	CodeIntegrationFail  = "INTEGRATION_FAILED"
 )
 
 // Diagnostic is one observation about the system.

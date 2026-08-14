@@ -75,6 +75,18 @@ go test ./...            # everything except the tmux-level acceptance run
 | ✓ | Repair cannot race start/stop/repair | `TestRepairHoldsTheLifecycleLock` |
 | ✓ | Temp-file cleanup limited to managed paths | `TestRepairCleansOnlyManagedTempFiles` |
 | ✓ | Explicit, validated handoff retry | `swarm handoff retry` |
+| ✓ | Handed-off commits applied to the receiver's worktree | `TestIntegrateFastForward`, `assertIntegrationHappened`, `e2e-fourpack.sh` |
+| ✓ | Fast-forward when history is linear | `TestIntegrateFastForward` |
+| ✓ | Cherry-pick when branches diverged | `TestIntegrateCherryPick` |
+| ✓ | Conflicts abort cleanly and block | `TestIntegrateConflictAbortsCleanly`, `TestFailedIntegrationIsBlocking` |
+| ✓ | Integration refuses dirty worktrees | `TestIntegrateRefusesDirtyWorktree` |
+| ✓ | Integration refuses the wrong branch | `TestIntegrateRefusesWrongBranch` |
+| ✓ | Integration is idempotent, including after a cherry-pick rewrite | `TestIntegrateIsIdempotent`, `TestCherryPickIsIdempotent` |
+| ✓ | Source and local commit identity both recorded | `TestIntegrationMetadataRoundTrips`, `swarm task trace` |
+| ✓ | Integration state survives a restart | `TestIntegrationStateSurvivesRestart` |
+| ✓ | Integration metadata is orchestrator-owned | `TestSendClearsIntegrationMetadata` |
+| ✓ | Notes need no integration | `TestIntegrateNoteRequiresNothing` |
+| ✓ | Failed integration keeps work current | `TestIntegrateFailureIsRecordedAndWorkStaysCurrent` |
 
 ## Gaps
 
@@ -82,7 +94,9 @@ Ordered roughly by how much they matter.
 
 | | Gap | Notes |
 |---|---|---|
-| ☐ | **Commit materialisation across worktrees** | A `git_handoff` transfers a commit's *identity*, not its content. The receiver's worktree is on its own branch and does not contain the sender's files until someone merges or cherry-picks. Nothing does that automatically today, by design — it is the next milestone. The e2e run shows this plainly: four sibling branches, no merges. |
+| ☐ | **Final merge to the base branch is manual** | Role branches converge role-to-role, and the accepted result ends on the specifier's branch. Nothing moves it to `main`: `swarm task merge` was deliberately not built, so releasing stays a human step. Merge it yourself with ordinary Git. |
+| ☐ | **Multi-commit handoffs are not supported** | A `git_handoff` names exactly one commit. A range would be a separate, explicit feature. |
+| ☐ | **Conflicts need a human** | By design: the cherry-pick aborts, `doctor` reports `INTEGRATION_FAILED`, and repair never resolves it. |
 | ☐ | **Real-agent behavior is unproven** | Every test uses deterministic fake agents. The orchestrator is proven; whether Codex reliably follows the runtime protocol is an empirical question no test here answers. |
 | ☐ | **`done` does not enforce send-before-done** | The prompt and `handoff status` make the ordering visible, but an agent can still call `done` with `DOWNSTREAM_SENT: no` and drop the work. |
 | ☐ | **Route is code, not configuration** | `internal/handoff/route.go` is the single source, but per-project routes are not configurable. SwarmForge's two-pack and six-pack shapes are therefore out of reach. |

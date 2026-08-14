@@ -54,6 +54,7 @@ func newSwarm(t *testing.T) *swarm {
 	runGit(t, root, "init")
 	runGit(t, root, "config", "user.email", "swarm@example.com")
 	runGit(t, root, "config", "user.name", "swarm")
+	runGit(t, root, "config", "core.autocrlf", "false")
 
 	writeFile(t, filepath.Join(root, "README.md"), "demo project\n")
 	writeFile(t, filepath.Join(root, ".gitignore"), ".swarm/\n")
@@ -246,6 +247,34 @@ func (a *agent) advance(task, commit, note string) (handoff.Entry, bool) {
 	return entry, already
 }
 
+// integrate applies the handed-off commit to this role's worktree, exactly as
+// `swarm handoff integrate <role>` does.
+func (a *agent) integrate() handoff.IntegrationResult {
+	a.s.t.Helper()
+
+	result, err := a.s.life.Integrate(
+		a.role, a.s.trees[a.role], "swarm/"+a.role, gitIntegrator{git.NewIntegrator()},
+	)
+	if err != nil {
+		a.s.t.Fatalf("%s integrate: %v", a.role, err)
+	}
+
+	return result
+}
+
+// gitIntegrator adapts the git integrator to the handoff interface.
+type gitIntegrator struct {
+	integrator *git.Integrator
+}
+
+func (g gitIntegrator) Integrate(worktree, branch, commit string) (string, string, bool, error) {
+	result, err := g.integrator.Integrate(worktree, branch, commit)
+	if err != nil {
+		return "", "", false, err
+	}
+	return result.Method, result.LocalCommit, result.Already, nil
+}
+
 // done completes the current work.
 func (a *agent) done() {
 	a.s.t.Helper()
@@ -264,9 +293,11 @@ func (a *agent) cycle(task string) handoff.Entry {
 		a.s.t.Fatalf("%s had no work to do", a.role)
 	}
 
-	// A git_handoff names a commit; inspect it rather than assuming.
+	// A git_handoff names a commit; inspect it, then actually apply it. A role
+	// that skipped this would be working on state it never received.
 	if c := work[0].CanonicalCommit; c != "" {
 		runGit(a.s.t, a.s.trees[a.role], "cat-file", "-e", c)
+		a.integrate()
 	}
 
 	commit := a.work()

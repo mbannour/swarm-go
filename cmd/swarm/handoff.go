@@ -18,7 +18,7 @@ import (
 
 func runHandoff(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: swarm handoff <send|next|inbox|outbox|ready|current|status|done|retry|ack|daemon>")
+		fmt.Println("usage: swarm handoff <send|next|inbox|outbox|ready|integrate|current|status|done|retry|ack|daemon>")
 		os.Exit(1)
 	}
 
@@ -32,6 +32,16 @@ func runHandoff(args []string) {
 
 	life := handoff.NewLifecycle(store, receiveModeLookup(cfg))
 
+	// Each role's worktree and branch, resolved from configuration.
+	var targets []roleTarget
+	for _, r := range cfg.Roles {
+		wt, err := wtMgr.Plan(r.Name, r.Worktree)
+		if err != nil {
+			fail(fmt.Errorf("role %s: %w", r.Name, err))
+		}
+		targets = append(targets, roleTarget{Name: r.Name, Worktree: wt.AbsPath, Branch: wt.Branch})
+	}
+
 	switch args[0] {
 	case "send":
 		fail(handoffSend(store, args[1:]))
@@ -43,6 +53,8 @@ func runHandoff(args []string) {
 		fail(handoffBox(store, handoff.BoxOutbox, args[1:]))
 	case "ready":
 		fail(handoffReady(life, args[1:]))
+	case "integrate":
+		fail(handoffIntegrate(life, targets, args[1:]))
 	case "current":
 		fail(handoffCurrent(life, args[1:]))
 	case "status":

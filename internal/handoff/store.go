@@ -139,6 +139,12 @@ func (s *Store) Send(h Handoff) (Entry, error) {
 	h.CreatedAt = s.Now().UTC()
 	h.DeliveredAt = time.Time{}
 	h.CanonicalCommit = ""
+	// Integration is the receiver's business, recorded by the orchestrator.
+	h.IntegrationStatus = ""
+	h.IntegrationMethod = ""
+	h.LocalCommit = ""
+	h.IntegratedAt = time.Time{}
+	h.IntegrationError = ""
 
 	if err := Validate(h, s.Roles, h.From); err != nil {
 		return Entry{}, err
@@ -587,4 +593,15 @@ func (s *Store) Ack(role, name string) (string, error) {
 	}
 
 	return dst, nil
+}
+
+// UpdateEntry rewrites a handoff file in place, atomically.
+//
+// It is how orchestrator-generated state — integration metadata — is recorded
+// against work that is already in a role's current box.
+func (s *Store) UpdateEntry(e Entry) error {
+	if e.Path == "" {
+		return fmt.Errorf("entry has no path")
+	}
+	return writeFileAtomic(e.Path, []byte(Marshal(e.Handoff)))
 }

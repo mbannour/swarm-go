@@ -132,6 +132,27 @@ swarm repair
 Swarm only ever prunes registrations under `.swarm/worktrees`, and refuses to
 prune at all if an unrelated worktree is also prunable.
 
+### An integration conflict
+
+```
+  architect
+  ✗ INTEGRATION_FAILED   integrating the handed-off commit failed: cherry-pick
+                         conflict applying f638d3d5f2: impl.txt
+```
+
+The cherry-pick was aborted, so the worktree is clean and unchanged — but the
+change was not applied. Repair will not resolve it. Either fix it by hand in the
+role's worktree, or send a note upstream describing the conflict:
+
+```bash
+cd .swarm/worktrees/wt-architect
+git cherry-pick <source-commit>     # resolve, then: git cherry-pick --continue
+swarm handoff integrate architect   # confirms it is now already-integrated
+```
+
+`INTEGRATION_PENDING` is the harmless sibling: the commit simply has not been
+applied yet. `swarm repair` will run the integration for you.
+
 ### A failed handoff
 
 Failed means the message was valid but could not be delivered — most often a
@@ -228,6 +249,8 @@ Automation should match these, not the messages.
 | `HANDOFF_REJECTED` | no | invalid messages quarantined |
 | `HANDOFF_CURRENT_CORRUPT` | **no** | more current work than the mode allows |
 | `HANDOFF_ORPHAN_DELIVERY` | yes | delivered but not recorded as sent |
+| `INTEGRATION_PENDING` | yes | a handed-off commit has not been applied yet |
+| `INTEGRATION_FAILED` | **no** | cherry-pick conflict; needs a human |
 | `RUNTIME_TEMP_FILES` | yes | abandoned atomic-write temporaries |
 | `LOCK_ACTIVE` | n/a | a lifecycle operation is running elsewhere |
 

@@ -39,6 +39,27 @@ Read the handoff file itself before acting. For a git_handoff, inspect the
 canonical commit — `git show`, `git log`, `git diff` — to see the state you are
 being handed. Never guess at what a commit contains.
 
+# Getting the handed-off code into your worktree
+
+A git_handoff names a commit; it does not put that commit's files in your
+worktree. Before you change anything, run:
+
+    "$SWARM_BIN" handoff integrate <your role>
+
+That applies the commit to your branch — fast-forward where possible, otherwise
+a cherry-pick — and records what it did. It is safe to re-run: a commit you
+already have reports ALREADY_INTEGRATED and is not applied twice.
+
+Never do this yourself with git merge, git cherry-pick, git rebase or git reset.
+The command knows which branch and worktree are yours; a hand-run Git command
+can put the work somewhere nobody will find it.
+
+If you get INTEGRATION_CONFLICT, the cherry-pick was aborted and your worktree
+is untouched. Do not try to force it. Send a note back upstream describing the
+conflicting files and stop.
+
+For a note, there is nothing to integrate; skip this step.
+
 To re-read your active work at any time without changing anything:
 
     "$SWARM_BIN" handoff current <your role>
@@ -61,21 +82,23 @@ For each piece of work, in this order:
 1. Get the work:      "$SWARM_BIN" handoff ready <your role>
 2. If NO_TASK, stop here and wait.
 3. Inspect the handoff file and, for a git_handoff, the commit it names.
-4. Do only your own role's job. If the work belongs to another role, say so in
+4. For a git_handoff: "$SWARM_BIN" handoff integrate <your role>
+5. Do only your own role's job. If the work belongs to another role, say so in
    your handoff note rather than doing it yourself.
-5. Verify: build, run the tests, and read the actual output.
-6. If you changed tracked files, commit them coherently:
+6. Verify: build, run the tests, and read the actual output.
+7. If you changed tracked files, commit them coherently:
 
        git status
        git add <the files you changed>
        git commit -m "<what and why>"
 
-7. Send the work downstream (see below).
-8. Only after the handoff has been created successfully:
+8. Send the work downstream (see below).
+9. Only after the handoff has been created successfully:
 
        "$SWARM_BIN" handoff done <your role>
 
-9. `done` prints your next task, or NO_TASK. If it printed a task, go to step 3.
+10. `done` prints your next task, or NO_TASK. If it printed a task, go to
+    step 3.
 
 Do not run a shell loop. Never write `while true`, `sleep`, or a polling loop.
 You are the persistent process; you run these commands one at a time, when

@@ -45,6 +45,11 @@ func Marshal(h Handoff) string {
 	writeIf("task", h.Task)
 	writeIf("commit", h.Commit)
 	writeIf("canonical_commit", h.CanonicalCommit)
+	writeIf("integration_status", h.IntegrationStatus)
+	writeIf("integration_method", h.IntegrationMethod)
+	writeIf("local_commit", h.LocalCommit)
+	writeIf("integrated_at", formatTime(h.IntegratedAt))
+	writeIf("integration_error", h.IntegrationError)
 	fmt.Fprintf(&b, "priority: %d\n", h.Priority)
 	writeIf("created_at", formatTime(h.CreatedAt))
 	writeIf("delivered_at", formatTime(h.DeliveredAt))
@@ -113,6 +118,20 @@ func Unmarshal(data []byte) (Handoff, error) {
 			h.Commit = value
 		case "canonical_commit":
 			h.CanonicalCommit = value
+		case "integration_status":
+			h.IntegrationStatus = value
+		case "integration_method":
+			h.IntegrationMethod = value
+		case "local_commit":
+			h.LocalCommit = value
+		case "integration_error":
+			h.IntegrationError = value
+		case "integrated_at":
+			t, err := parseTime(value)
+			if err != nil {
+				return Handoff{}, fmt.Errorf("line %d: integrated_at: %w", line, err)
+			}
+			h.IntegratedAt = t
 		case "priority":
 			n, err := strconv.Atoi(value)
 			if err != nil {

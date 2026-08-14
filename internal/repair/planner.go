@@ -24,6 +24,7 @@ const (
 	KindPruneWorktrees      Kind = "prune-worktrees"
 	KindReconcileOrphan     Kind = "reconcile-orphan"
 	KindCleanTempFiles      Kind = "clean-temp-files"
+	KindIntegrate           Kind = "integrate"
 )
 
 // Action is one planned change.
@@ -84,6 +85,9 @@ func PlanFrom(report diagnostics.Report) Plan {
 		{diagnostics.CodeOrphanDelivery, KindReconcileOrphan, func(d diagnostics.Diagnostic) string {
 			return fmt.Sprintf("mark %s's handoff %s as sent (it was already delivered)",
 				d.Component, shortID(d.Detail["id"]))
+		}},
+		{diagnostics.CodeIntegrationPend, KindIntegrate, func(d diagnostics.Diagnostic) string {
+			return fmt.Sprintf("integrate %s's handed-off commit into its worktree", d.Component)
 		}},
 		{diagnostics.CodeTempFiles, KindCleanTempFiles, func(d diagnostics.Diagnostic) string {
 			return "remove stale temporary files from the managed runtime directory"
