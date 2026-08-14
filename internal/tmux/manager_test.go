@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSessionName(t *testing.T) {
@@ -184,5 +185,73 @@ func TestEnsureSocketDirIsPrivate(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o700 {
 		t.Errorf("socket dir perm = %o, want 700", perm)
+	}
+}
+
+// A wake-up must actually be submitted, not merely typed into the pane.
+//
+// This is a regression test for a real failure: the daemon sent the text and
+// Enter back-to-back, the interactive agent kept the line in its composer
+// unsent, and every delivery went unnoticed.
+func TestSendPromptSubmitsTheLine(t *testing.T) {
+	if !Available() {
+		t.Skip("tmux not available")
+	}
+
+	socket := filepath.Join(t.TempDir(), "test.sock")
+	m := &Manager{Socket: socket}
+
+	workdir := t.TempDir()
+	ref := RoleRef{Name: "coder", WorkingDir: workdir}
+
+	t.Cleanup(func() { _, _ = run(socket, "kill-server") })
+
+	if _, _, err := m.Create(ref); err != nil {
+		t.Fatal(err)
+	}
+
+	// The pane runs a shell, so a submitted line executes and leaves evidence.
+	marker := filepath.Join(workdir, "submitted.marker")
+	if err := m.SendPrompt(SessionName("coder"), "touch "+marker); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			return // the line was entered, not just typed
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	pane, _ := run(socket, "capture-pane", "-p", "-t", SessionName("coder"))
+	t.Fatalf("the prompt was never submitted; pane shows:\n%s", pane)
+}
+
+// SendKeys stays raw: it types, and the caller decides about Enter.
+func TestSendKeysDoesNotSubmitOnItsOwn(t *testing.T) {
+	if !Available() {
+		t.Skip("tmux not available")
+	}
+
+	socket := filepath.Join(t.TempDir(), "test.sock")
+	m := &Manager{Socket: socket}
+
+	workdir := t.TempDir()
+	t.Cleanup(func() { _, _ = run(socket, "kill-server") })
+
+	if _, _, err := m.Create(RoleRef{Name: "coder", WorkingDir: workdir}); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(workdir, "should-not-exist.marker")
+	if err := m.SendKeys(SessionName("coder"), "touch "+marker); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("SendKeys submitted the line by itself")
 	}
 }

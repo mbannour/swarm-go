@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // SessionPrefix is prepended to a role name to form its tmux session name.
@@ -252,4 +253,27 @@ func (m *Manager) ServerAlive() bool {
 		return true
 	}
 	return !isNoServer(err)
+}
+
+// promptSettleDelay is how long to wait between typing text into a pane and
+// pressing Enter.
+//
+// Interactive TUIs (Codex among them) read the pasted text asynchronously: an
+// Enter delivered in the same instant arrives before the composer has taken the
+// text, so the line sits there unsent and the agent never sees it. A short
+// pause makes the submission reliable. It is only paid once per wake-up.
+const promptSettleDelay = 400 * time.Millisecond
+
+// SendPrompt types a line into a session's active pane and submits it.
+//
+// Use this rather than SendKeys when the target is an interactive program that
+// needs the input actually entered, not merely typed.
+func (m *Manager) SendPrompt(name, text string) error {
+	if err := m.SendKeys(name, text); err != nil {
+		return err
+	}
+
+	time.Sleep(promptSettleDelay)
+
+	return m.SendKeys(name, "Enter")
 }

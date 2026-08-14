@@ -466,7 +466,14 @@ TASK_SUBMITTED: RATE-1
 DESTINATION: specifier
 ID: a4174c47932e7a8015e143caa0e2358c
 FILE: …/.swarm/handoffs/specifier/inbox/…-system-to-specifier.handoff
+NOTIFIED: yes
 ```
+
+`NOTIFIED` reports whether the entry role's agent was told to look. A submitted
+task goes straight to the inbox, bypassing the daemon — and the daemon is what
+normally sends wake-ups — so `task submit` sends one itself. `NOTIFIED: no`
+just means no session was running; the work is durable and `handoff ready`
+still finds it.
 
 The submitter is deliberately **not** a role. It appears as the reserved
 `system` sender, which owns no worktree, no session and no outbox, and can never
@@ -1194,6 +1201,11 @@ That is deliberately all. The message content lives in the file, where it
 survives a crash, a detach, or a restarted agent — tmux is only used to ring the
 bell. No task, commit, or note text is ever typed into a terminal.
 
+The sentence is *entered*, not merely typed: swarm types the line, pauses for
+the agent's input box to take it, then presses Enter. Sending both at once looks
+identical in a shell but leaves the line sitting unsent in an interactive TUI —
+which is exactly how a swarm ends up idle with a full inbox.
+
 ## tmux crash course
 
 If you have never used tmux, this is all you need.
@@ -1396,9 +1408,21 @@ usually because you were interrupted after sending. Run `handoff done <role>`.
 `handoff ready` first. For an unrelated message, use `handoff send`.
 
 **An agent sits idle with work in its inbox**
-Its wake-up may have been missed (a notification is best-effort). `swarm status`
-will show `ready`; attach to the session and let the agent run
-`handoff ready <role>`.
+Wake-ups are best-effort, so this is always recoverable: `swarm status` shows
+the role as `ready`; attach and let the agent run `handoff ready <role>`, or
+just wait for its next poll. If it happens *every* time, check that the agent's
+input is actually being submitted — see the note under
+[What agents see](#what-agents-see).
+
+**Codex asks "do you trust this directory?" on first start**
+A one-time gate per worktree, shown before your prompt is read. Answer it once
+in each session (`swarm sessions attach <role>`); Codex remembers thereafter.
+
+**An agent stops and asks permission before running a command**
+Codex's default approval policy. Agents will pause at the first `git commit`
+and wait for a human. For unattended runs, configure an approval policy you are
+comfortable with in `~/.codex/config.toml` — swarm does not choose your
+autonomy level for you.
 
 **An agent invents work, or ignores the lifecycle**
 Check what it was actually told: `cat .swarm/runtime/prompts/<role>.prompt`.
@@ -1643,6 +1667,9 @@ proves it; everything else is listed as a gap, however finished the code looks.
   but it cannot force an agent to run the commands.
 - **Nothing re-notifies** an agent that ignored a wake-up; `ready` is the
   recovery path.
+- **Agent CLIs may gate on their own prompts** — Codex asks to trust a new
+  directory, and asks approval before running commands. Swarm does not answer
+  those for you, so a first run needs a human at each session.
 - **`ack` is deprecated** but still present, so two lifecycles technically
   coexist until it is removed.
 - **New worktrees branch from current `HEAD`**, not from a fixed base branch.

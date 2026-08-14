@@ -487,11 +487,9 @@ func (n tmuxNotifier) Notify(role string) error {
 		return err
 	}
 
-	if err := n.mgr.SendKeys(session, handoff.WakeUpMessage); err != nil {
-		return err
-	}
-
-	return n.mgr.SendKeys(session, "Enter")
+	// SendPrompt, not SendKeys: the wake-up has to be entered, not merely
+	// typed into an agent's composer where it would sit unread.
+	return n.mgr.SendPrompt(session, handoff.WakeUpMessage)
 }
 
 func dash(s string) string {

@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/mbannour/swarm-go/internal/handoff"
+	"github.com/mbannour/swarm-go/internal/tmux"
 )
 
 // EntryRole is where externally submitted work enters the four-pack.
@@ -27,7 +28,7 @@ func runTask(args []string) {
 
 	switch args[0] {
 	case "submit":
-		fail(taskSubmit(store, args[1:]))
+		fail(taskSubmit(store, wtMgr.Root, args[1:]))
 	case "trace":
 		fail(taskTrace(store, args[1:]))
 	default:
@@ -40,7 +41,7 @@ func runTask(args []string) {
 //
 // The submitter is not a role — it owns no worktree, session or outbox — so
 // this does not weaken the rule that only configured roles exchange handoffs.
-func taskSubmit(store *handoff.Store, args []string) error {
+func taskSubmit(store *handoff.Store, repoRoot string, args []string) error {
 	fs := flag.NewFlagSet("task submit", flag.ContinueOnError)
 
 	var (
@@ -74,7 +75,36 @@ func taskSubmit(store *handoff.Store, args []string) error {
 	fmt.Printf("ID: %s\n", entry.ID)
 	fmt.Printf("FILE: %s\n", entry.Path)
 
+	// A submitted task lands straight in the inbox, so the daemon — which only
+	// notifies on delivery from an outbox — never sees it. Without this the
+	// entry role sits idle with work waiting and nothing telling it to look.
+	if err := wakeRole(repoRoot, *to); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not wake %s: %v\n", *to, err)
+		fmt.Println("NOTIFIED: no")
+		return nil
+	}
+
+	fmt.Println("NOTIFIED: yes")
+
 	return nil
+}
+
+// wakeRole tells a role's agent to check its inbox. A role with no running
+// session is not an error: the work is durable and `handoff ready` finds it.
+func wakeRole(repoRoot, role string) error {
+	if !tmux.Available() {
+		return nil
+	}
+
+	mgr := tmux.NewManager(repoRoot)
+	session := tmux.SessionName(role)
+
+	live, err := mgr.HasSession(session)
+	if err != nil || !live {
+		return err
+	}
+
+	return tmuxNotifier{mgr}.Notify(role)
 }
 
 // taskTrace reconstructs a task's journey from durable handoff metadata.
