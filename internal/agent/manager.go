@@ -40,6 +40,9 @@ type Role struct {
 	// Approval is the autonomy this role's agent was granted. Empty means
 	// interactive: autonomy is always opted into.
 	Approval Approval
+	// WritableRoots are directories the agent may write to besides its
+	// worktree, for toolchain caches a sandbox would otherwise block.
+	WritableRoots []string
 }
 
 // Manager launches and stops agents in existing tmux sessions.
@@ -139,7 +142,7 @@ func (m *Manager) Start(r Role, assembled string) (started bool, err error) {
 	}
 
 	session := tmux.SessionName(r.Name)
-	line, err := backend.Launch(r.Name, promptPath, r.Worktree, r.Approval)
+	line, err := backend.LaunchWith(r.Name, promptPath, r.Worktree, r.Approval, m.writableRoots(r))
 	if err != nil {
 		return false, fmt.Errorf("role %q: %w", r.Name, err)
 	}
@@ -154,6 +157,26 @@ func (m *Manager) Start(r Role, assembled string) (started bool, err error) {
 	}
 
 	return true, nil
+}
+
+// writableRoots is what a sandboxed agent may write to besides its worktree.
+//
+// The repository's .git directory is always included, and that is swarm's own
+// doing rather than the operator's: a role works in a *linked* worktree, whose
+// index, refs and objects all live in the main repository. Without it the agent
+// can build and test but cannot commit — which is exactly where the first real
+// run stopped, with git reporting the worktree metadata read-only.
+//
+// Everything else comes from configuration, so widening the sandbox further
+// stays a deliberate choice.
+func (m *Manager) writableRoots(r Role) []string {
+	roots := make([]string, 0, len(r.WritableRoots)+1)
+
+	if m.RepoRoot != "" {
+		roots = append(roots, filepath.Join(m.RepoRoot, ".git"))
+	}
+
+	return append(roots, r.WritableRoots...)
 }
 
 // Stop interrupts the agent with Ctrl-C, leaving the tmux session alive.

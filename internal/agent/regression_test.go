@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -114,5 +115,122 @@ func TestReadinessAllowsInteractiveWithoutTrust(t *testing.T) {
 	state, _ := codex.Ready(t.TempDir(), ApprovalInteractive)
 	if state != ReadinessReady && state != ReadinessNotAuthed {
 		t.Errorf("interactive readiness = %q, want ready", state)
+	}
+}
+
+// A sandboxed agent must be able to reach its toolchain's cache.
+//
+// This is the blocker the first real smoke run hit: with only the worktree
+// writable, `go test` could not write its build cache, so the coder could not
+// verify its work and correctly refused to commit unverified code.
+func TestAutonomousLaunchGrantsWritableRoots(t *testing.T) {
+	codex := Codex{}
+
+	line, err := codex.LaunchWith("coder", "/p", "/w", ApprovalAutonomous,
+		[]string{"/home/dev/.cache/go-build", "/home/dev/go/pkg/mod"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{
+		"--add-dir '/home/dev/.cache/go-build'",
+		"--add-dir '/home/dev/go/pkg/mod'",
+		"--sandbox workspace-write",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("launch is missing %q:\n%s", want, line)
+		}
+	}
+}
+
+// Interactive runs have no sandbox, so extra roots are meaningless there and
+// must not appear.
+func TestInteractiveLaunchIgnoresWritableRoots(t *testing.T) {
+	codex := Codex{}
+
+	line, err := codex.LaunchWith("coder", "/p", "/w", ApprovalInteractive,
+		[]string{"/home/dev/.cache/go-build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(line, "--add-dir") {
+		t.Errorf("interactive launch carries sandbox flags:\n%s", line)
+	}
+}
+
+// Paths are quoted: a directory with a space must not split into two flags.
+func TestWritableRootsAreShellQuoted(t *testing.T) {
+	codex := Codex{}
+
+	line, err := codex.LaunchWith("coder", "/p", "/w", ApprovalAutonomous,
+		[]string{"/home/some one/.cache"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(line, `--add-dir '/home/some one/.cache'`) {
+		t.Errorf("writable root was not quoted:\n%s", line)
+	}
+}
+
+// A role commits from a linked worktree, whose Git metadata lives in the main
+// repository — so the sandbox must always include it.
+//
+// The first real run got as far as "go test passed, go build passed" and then
+// could not commit: .git/worktrees/<role> was read-only.
+func TestSandboxAlwaysGrantsGitDirectory(t *testing.T) {
+	m := &Manager{RepoRoot: "/repo"}
+
+	roots := m.writableRoots(Role{
+		Name: "coder", WritableRoots: []string{"/home/dev/.cache/go-build"},
+	})
+
+	if len(roots) == 0 || roots[0] != filepath.Join("/repo", ".git") {
+		t.Fatalf("roots = %v, want the repository .git first", roots)
+	}
+
+	var found bool
+	for _, r := range roots {
+		if r == "/home/dev/.cache/go-build" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("configured writable roots were dropped")
+	}
+}
+
+// `trusted` is the opt-in escape hatch for unattended commits: Codex's
+// workspace-write sandbox protects .git, so a linked worktree cannot be
+// committed to under it.
+func TestTrustedLaunchDisablesTheSandbox(t *testing.T) {
+	codex := Codex{}
+
+	line, err := codex.Launch("coder", "/p", "/w", ApprovalTrusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(line, "--sandbox danger-full-access") {
+		t.Errorf("trusted launch is still sandboxed:\n%s", line)
+	}
+	if !strings.Contains(line, "--ask-for-approval never") {
+		t.Errorf("trusted launch still asks for approval:\n%s", line)
+	}
+}
+
+// It must never be reachable by accident: only by naming it.
+func TestSandboxIsOnUnlessTrustedIsChosen(t *testing.T) {
+	codex := Codex{}
+
+	for _, policy := range []Approval{ApprovalInteractive, ApprovalAutonomous, ApprovalRestricted} {
+		line, err := codex.Launch("coder", "/p", "/w", policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(line, "danger-full-access") {
+			t.Errorf("%s silently disabled the sandbox:\n%s", policy, line)
+		}
 	}
 }

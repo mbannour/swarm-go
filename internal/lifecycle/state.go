@@ -57,7 +57,8 @@ type Role struct {
 	Worktree     string // absolute path
 	Branch       string
 	ReceiveMode  string
-	Approval     string // interactive | autonomous | restricted
+	Approval     string   // interactive | autonomous | restricted
+	Writable     []string // extra writable directories for sandboxed agents
 }
 
 // NotificationStatus is what status reports about waking a role.

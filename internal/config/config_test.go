@@ -122,3 +122,36 @@ func TestUnknownApprovalPolicyIsRejected(t *testing.T) {
 		t.Error("an unknown approval policy was accepted")
 	}
 }
+
+// Writable roots let a sandboxed agent reach its toolchain caches.
+func TestWritableRootsAreParsed(t *testing.T) {
+	body := fourPack + `
+writable /home/dev/.cache/go-build
+writable /home/dev/go/pkg/mod
+`
+
+	cfg, err := Load(write(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(cfg.WritableRoots) != 2 {
+		t.Fatalf("writable roots = %v", cfg.WritableRoots)
+	}
+	if cfg.WritableRoots[0] != "/home/dev/.cache/go-build" {
+		t.Errorf("first root = %q", cfg.WritableRoots[0])
+	}
+	// The four-pack itself still parses alongside the new directive.
+	if err := cfg.ValidateFourPack(); err != nil {
+		t.Errorf("ValidateFourPack: %v", err)
+	}
+}
+
+func TestWritableRootsMustBeAbsolute(t *testing.T) {
+	if _, err := Load(write(t, "writable ../escape\n")); err == nil {
+		t.Error("a relative writable path was accepted")
+	}
+	if _, err := Load(write(t, "writable\n")); err == nil {
+		t.Error("a writable directive with no path was accepted")
+	}
+}

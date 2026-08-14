@@ -29,6 +29,11 @@ type Backend interface {
 	// Launch returns the command line for a role under an approval policy.
 	// An unsupported policy must be an error, never a silent downgrade.
 	Launch(role, promptPath, workdir string, policy Approval) (string, error)
+
+	// LaunchWith is Launch plus directories the agent may write to outside its
+	// worktree — a sandboxed backend otherwise blocks every toolchain whose
+	// cache lives in $HOME.
+	LaunchWith(role, promptPath, workdir string, policy Approval, writable []string) (string, error)
 }
 
 // Approval mirrors config.ApprovalPolicy without importing it, keeping the
@@ -39,6 +44,9 @@ const (
 	ApprovalInteractive Approval = "interactive"
 	ApprovalAutonomous  Approval = "autonomous"
 	ApprovalRestricted  Approval = "restricted"
+	// ApprovalTrusted disables the backend's sandbox. Required for unattended
+	// commits with Codex, whose workspace-write sandbox protects .git.
+	ApprovalTrusted Approval = "trusted"
 )
 
 // Capabilities describes a backend's runtime abilities.
@@ -104,7 +112,7 @@ func (Codex) Capabilities() Capabilities {
 	return Capabilities{
 		Interactive: true,
 		ApprovalPolicies: []Approval{
-			ApprovalInteractive, ApprovalAutonomous, ApprovalRestricted,
+			ApprovalInteractive, ApprovalAutonomous, ApprovalRestricted, ApprovalTrusted,
 		},
 		// Codex asks to trust a directory the first time it runs there, so a
 		// worktree must be trusted before an unattended launch.
@@ -124,7 +132,16 @@ func (Codex) Capabilities() Capabilities {
 //	autonomous   -a never -s workspace-write — no prompts, writes confined to
 //	             the worktree, network and the wider filesystem still sandboxed
 //	restricted   -a never -s read-only — unattended but unable to modify files
-func (Codex) Launch(role, promptPath, workdir string, policy Approval) (string, error) {
+func (c Codex) Launch(role, promptPath, workdir string, policy Approval) (string, error) {
+	return c.LaunchWith(role, promptPath, workdir, policy, nil)
+}
+
+// LaunchWith adds writable roots via `--add-dir`, which `codex --help`
+// documents as "additional directories that should be writable alongside the
+// primary workspace". Sandboxed policies need it: with only the worktree
+// writable, `go test` cannot reach its build cache and quietly fails, so an
+// agent told to verify before committing correctly refuses to commit.
+func (Codex) LaunchWith(role, promptPath, workdir string, policy Approval, writable []string) (string, error) {
 	var flags string
 
 	switch policy {
@@ -134,8 +151,23 @@ func (Codex) Launch(role, promptPath, workdir string, policy Approval) (string, 
 		flags = " --ask-for-approval never --sandbox workspace-write"
 	case ApprovalRestricted:
 		flags = " --ask-for-approval never --sandbox read-only"
+	case ApprovalTrusted:
+		// No sandbox. Codex's workspace-write sandbox keeps .git read-only, and
+		// a linked worktree cannot be committed to without it — so an
+		// unattended coder needs this, and the operator opts in by name.
+		flags = " --ask-for-approval never --sandbox danger-full-access"
 	default:
 		return "", fmt.Errorf("codex does not support approval policy %q", policy)
+	}
+
+	// Extra writable roots only mean anything when a sandbox is in force.
+	if policy == ApprovalAutonomous || policy == ApprovalRestricted {
+		for _, dir := range writable {
+			if dir == "" {
+				continue
+			}
+			flags += " --add-dir " + shellQuote(dir)
+		}
 	}
 
 	return fmt.Sprintf(
@@ -168,14 +200,18 @@ func (Fake) Capabilities() Capabilities {
 	return Capabilities{
 		Interactive: false,
 		ApprovalPolicies: []Approval{
-			ApprovalInteractive, ApprovalAutonomous, ApprovalRestricted,
+			ApprovalInteractive, ApprovalAutonomous, ApprovalRestricted, ApprovalTrusted,
 		},
 		WorkspaceTrust:    false,
 		UnattendedStartup: true,
 	}
 }
 
-func (Fake) Launch(role, promptPath, workdir string, policy Approval) (string, error) {
+func (f Fake) Launch(role, promptPath, workdir string, policy Approval) (string, error) {
+	return f.LaunchWith(role, promptPath, workdir, policy, nil)
+}
+
+func (Fake) LaunchWith(role, promptPath, workdir string, policy Approval, writable []string) (string, error) {
 	return fmt.Sprintf(
 		"%s %s %s %s",
 		FakeAgentExecutable,

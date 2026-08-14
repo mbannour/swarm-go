@@ -159,11 +159,24 @@ printf '# smoke\n' >README.md
 
 # Autonomous: the whole point is that no human answers anything.
 cat >swarm.conf <<'CONF'
-window specifier codex wt-specifier task autonomous
-window coder codex wt-coder task autonomous
-window refactorer codex wt-refactorer task autonomous
-window architect codex wt-architect task autonomous
+window specifier codex wt-specifier task trusted
+window coder codex wt-coder task trusted
+window refactorer codex wt-refactorer task trusted
+window architect codex wt-architect task trusted
 CONF
+
+# `trusted` runs Codex with its sandbox off. That is a deliberate choice for a
+# throwaway repository under /tmp: Codex's workspace-write sandbox keeps .git
+# read-only, so a role working in a linked worktree can build and test but
+# never commit — which is precisely what this test has to prove.
+#
+# A sandboxed agent can only write inside its worktree, but Go keeps its build
+# and module caches under $HOME. Without these the coder cannot run `go test`,
+# and — correctly — will not commit work it could not verify.
+for dir in "$(go env GOCACHE)" "$(go env GOMODCACHE)"; do
+    [ -n "$dir" ] && echo "writable $dir" >>swarm.conf
+done
+echo "  writable roots: $(go env GOCACHE), $(go env GOMODCACHE)"
 
 git add -A && git commit -qm "initial commit"
 echo "  repository at $REPO"

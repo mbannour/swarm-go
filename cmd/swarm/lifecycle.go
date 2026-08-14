@@ -32,6 +32,7 @@ func newLifecycleManager() *lifecycle.Manager {
 			Branch:       wt.Branch,
 			ReceiveMode:  string(r.ReceiveMode),
 			Approval:     string(r.Approval),
+			Writable:     cfg.WritableRoots,
 		})
 	}
 

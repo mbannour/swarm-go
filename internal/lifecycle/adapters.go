@@ -65,12 +65,13 @@ type CodingAgents struct {
 
 func (c CodingAgents) role(r Role) agent.Role {
 	return agent.Role{
-		Name:        r.Name,
-		Backend:     r.Backend,
-		Worktree:    r.Worktree,
-		Branch:      r.Branch,
-		ReceiveMode: r.ReceiveMode,
-		Approval:    agent.Approval(r.Approval),
+		Name:          r.Name,
+		Backend:       r.Backend,
+		Worktree:      r.Worktree,
+		Branch:        r.Branch,
+		ReceiveMode:   r.ReceiveMode,
+		Approval:      agent.Approval(r.Approval),
+		WritableRoots: r.Writable,
 	}
 }
 

@@ -65,12 +65,13 @@ func agentRoles(cfg *config.Config, wtMgr *git.WorktreeManager) ([]agent.Role, e
 			return nil, fmt.Errorf("role %s: %w", r.Name, err)
 		}
 		out = append(out, agent.Role{
-			Name:        r.Name,
-			Backend:     r.Backend,
-			Worktree:    wt.AbsPath,
-			Branch:      wt.Branch,
-			ReceiveMode: string(r.ReceiveMode),
-			Approval:    agent.Approval(r.Approval),
+			Name:          r.Name,
+			Backend:       r.Backend,
+			Worktree:      wt.AbsPath,
+			Branch:        wt.Branch,
+			ReceiveMode:   string(r.ReceiveMode),
+			Approval:      agent.Approval(r.Approval),
+			WritableRoots: cfg.WritableRoots,
 		})
 	}
 

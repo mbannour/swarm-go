@@ -239,14 +239,42 @@ window architect codex wt-architect task
 ```
 
 ```text
-window  <role>  <backend>  <worktree>  <receive-mode>
-  │       │        │          │             │
+window  <role>  <backend>  <worktree>  <receive-mode>  [approval]
+  │       │        │          │             │              │
+  │       │        │          │             │              └─ interactive (default)
+  │       │        │          │             │                 | autonomous | restricted
   │       │        │          │             └─ task | batch
   │       │        │          └─ directory under .swarm/worktrees/
   │       │        └─ codex
   │       └─ role name; also names the branch and the tmux session
   └─ literal keyword
 ```
+
+**Approval** is how much the agent may do without a human. It defaults to
+`interactive`, which is safe but **stalls an unattended swarm** the first time
+an agent wants to run a command. For a swarm that runs itself:
+
+```text
+window coder codex wt-coder task autonomous
+```
+
+⚠️ **An `autonomous` agent cannot commit.** Codex's sandbox keeps `.git`
+read-only, and roles work in linked worktrees whose Git metadata lives in the
+main repository — so an autonomous coder can write code and run tests, then
+correctly refuse to commit work it cannot record. For unattended commits use
+`trusted`, which disables the sandbox entirely; swarm never selects it for you.
+
+An autonomous agent is sandboxed to its own worktree, so grant the directories
+its toolchain needs to write:
+
+```text
+writable /home/you/.cache/go-build
+writable /home/you/go/pkg/mod
+```
+
+Both are covered in [`docs/backends/codex.md`](docs/backends/codex.md), along
+with `swarm bootstrap`, which records the workspace trust Codex requires before
+it will run unattended.
 
 Blank lines and `#` comments are ignored. Every command reads this file, so it
 decides what gets created, listed, and — importantly — what may be removed.

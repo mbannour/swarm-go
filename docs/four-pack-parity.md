@@ -122,8 +122,12 @@ RUN_REAL_CODEX_TESTS=1 ./scripts/real-codex-smoke.sh   # opt-in, costs model quo
 ### Real-agent smoke
 | | Feature | Evidence |
 |---|---|---|
-| ✓ | Unattended submit → specifier → coder → refactorer | **REAL** `scripts/real-codex-smoke.sh` |
+| ✓ | Unattended submit → specifier → coder → refactorer | **REAL** `scripts/real-codex-smoke.sh` — 10/10 checks, 125s |
 | ✓ | No manual tmux typing, Enter or approval | **REAL** — the script fails if a wait times out |
+| ✓ | Real agent writes code, tests pass, commits | **REAL** — commit contains Go source, `go test` passes |
+| ✓ | Real agent produces a valid `git_handoff` downstream | **REAL** — refactorer received it |
+| ✓ | Sandboxed toolchain caches reachable | **REAL** — `writable` roots via `--add-dir` |
+| ✓ | Unattended commits need `trusted` | **REAL** — `workspace-write` keeps `.git` read-only |
 
 ### Real four-pack E2E
 | | Feature | Evidence |
