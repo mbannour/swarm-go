@@ -147,43 +147,55 @@ Ordered roughly by how much they matter.
 | ☐ | **Final merge to the base branch is manual** | Role branches converge role-to-role, and the accepted result ends on the specifier's branch. Nothing moves it to `main`: `swarm task merge` was deliberately not built, so releasing stays a human step. Merge it yourself with ordinary Git. |
 | ☐ | **Multi-commit handoffs are not supported** | A `git_handoff` names exactly one commit. A range would be a separate, explicit feature. |
 | ☐ | **Conflicts need a human** | By design: the cherry-pick aborts, `doctor` reports `INTEGRATION_FAILED`, and repair never resolves it. |
-| ✓ | **Real-agent behavior: proven** | The full cycle runs unattended with real Codex (`scripts/real-fourpack-e2e.sh`). Five orchestrator bugs were found by running it and are now fixed and frozen as regression tests: `task submit` woke nobody; wake-ups were typed but never submitted; a linked worktree resolved the wrong repository root; sandboxed agents could not reach their toolchain caches; and `.git` was read-only under `workspace-write`, which is why unattended commits need the explicit `trusted` policy. |
 | ☐ | **`done` does not enforce send-before-done** | The prompt and `handoff status` make the ordering visible, but an agent can still call `done` with `DOWNSTREAM_SENT: no` and drop the work. |
 | ☐ | **Route is code, not configuration** | `internal/handoff/route.go` is the single source, but per-project routes are not configurable. SwarmForge's two-pack and six-pack shapes are therefore out of reach. |
 | ☐ | **Batch handoffs collapse to one downstream message** | A batch's `source_handoff_id` is its first item's id, so a batch produces one downstream handoff rather than one per item. |
 | ☐ | **Duplicate protection is per current-work** | A role that legitimately wants two different downstream messages from one task gets the first back from `handoff next`; `handoff send` is the escape hatch. |
 | ☐ | **Agent liveness is a heuristic** | `pane_current_command` not being a shell counts as "running", so any foreground program reads as the agent — and `AGENT_MISSING` can therefore be a false positive. |
-| ☐ | **Notification recovery is not automatic** | A delivered handoff whose tmux wake-up failed is not re-notified by repair; the recipient finds it with `handoff ready`. |
 | ☐ | **`stop` does not drain in-flight handoffs** | Anything left in an outbox is delivered on the next start. |
 | ☐ | **No `swarm clean`** | `swarm worktrees remove` is the manual path. |
 | ☐ | **Agent logs are not captured** | Only the daemon writes a managed log; agent output lives in tmux scrollback. |
 | ☐ | **Unix only** | flock, `setsid`, POSIX signals. No Windows implementation. |
 | ☐ | **Single daemon assumed for delivery ordering** | Enforced by a lock, so it is safe — but there is no multi-daemon or multi-host story. |
+| ☐ | **Unattended commits require `trusted`, which disables the sandbox** | Codex's `workspace-write` sandbox keeps `.git` read-only, so an `autonomous` role can build and test but never commit. `trusted` is the opt-in escape hatch; a narrower fix would need Codex to allow Git metadata writes under a sandbox. |
+| ☐ | **A real cycle takes minutes and real quota** | ~5 minutes and four-plus model turns for a trivial task. The real gates are opt-in and bounded for this reason; only the fake suite is suitable for CI. |
+| ☐ | **One real run is not a reliability claim** | The cycle passed; it is not yet evidence about flakiness, long tasks, conflicting edits, or agents that misbehave under pressure. |
 | ☐ | **No quality gates, planner, or dynamic workflows** | Deliberately out of scope for parity v0.1. |
 
-## What the acceptance run proves
+## What the acceptance runs prove
 
-`./scripts/e2e-fourpack.sh` builds the binary, creates a throwaway repository,
-starts the real orchestrator with fake agents in real tmux sessions, and:
+Three gates, in increasing cost and decreasing frequency.
 
-1. submits one requirement through the developer boundary;
-2. watches it travel specifier → coder → refactorer → architect → specifier;
-3. stops and starts the swarm mid-flight, asserting the in-flight work is
-   unchanged;
-4. asserts every role committed on its own branch, no queue holds failures or
-   rejects, no current work is stuck, no handoff id is duplicated, and the
-   implementation landed;
-5. prints the Git graph and the derived trace.
+### `./scripts/parity.sh` — every commit, no quota
 
-On failure it dumps status, every queue, failure reasons, the daemon log, tmux
-state, the Git graph and the trace before exiting non-zero.
+`go build`, `go vet`, `go test ./...`, `go test -race ./...` and the fake-agent
+four-pack E2E. Deterministic, model-free, safe for CI.
+
+### `RUN_REAL_CODEX_TESTS=1 ./scripts/real-codex-smoke.sh` — real, cheap
+
+Submit → specifier → coder → refactorer, with a real agent writing code, running
+tests and committing. Bounded; fails fast with diagnostics. 10 checks, ~2 min.
+
+### `RUN_REAL_CODEX_TESTS=1 ./scripts/real-fourpack-e2e.sh` — real, complete
+
+The whole cycle back to the specifier. 20 checks, ~5 min. Beyond the smoke test
+it proves the parts only real agents exercise:
+
+- a handed-off commit **integrated** into the receiver's worktree
+  (`METHOD: fast-forward` in the trace);
+- **role boundaries held** — the refactorer judged no refactor warranted and the
+  architect declined to write code, each doing less than it could because its
+  prompt said so;
+- **four consecutive wake-ups landed**, so notification holds under real timing.
+
+Both real gates fail if any hop stalls, which is what makes "no manual
+intervention" an assertion rather than a claim.
 
 ## CI
 
-`go test ./...` runs the whole suite except the tmux-level script. The
-acceptance suite in `internal/e2e` is deliberately tmux-free — it uses the real
-Git, handoff, daemon and lifecycle code with in-process fake agents — so the
-main proof of correctness runs anywhere, and is never silently skipped.
+`go test ./...` runs the whole deterministic suite. The acceptance suite in
+`internal/e2e` is deliberately tmux-free, so the main proof of correctness runs
+anywhere and is never silently skipped. `./scripts/e2e-fourpack.sh` needs tmux.
 
-`./scripts/e2e-fourpack.sh` needs `tmux` installed. Install it in CI to run the
-full CLI path; it exits non-zero with diagnostics if anything regresses.
+Real-agent scripts are opt-in via `RUN_REAL_CODEX_TESTS=1` and must never run in
+public CI: they cost money and depend on a model's behavior.

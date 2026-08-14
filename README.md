@@ -16,6 +16,7 @@ Clojure, no shell orchestration: one static binary and the standard library.
 - [Requirements](#requirements)
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Running unattended](#running-unattended)
 - [How it is laid out on disk](#how-it-is-laid-out-on-disk)
 - [Configuration: `swarm.conf`](#configuration-swarmconf)
 - [Prompts](#prompts)
@@ -144,20 +145,28 @@ Run these **from the root of the repository you want the agents to work on**.
 git add -A && git commit -m "initial commit"
 go build -o ./bin/swarm ./cmd/swarm
 
-# 1. bring up everything: worktrees, daemon, sessions, agents
+# 1. one-time: let the backend run without a human answering its prompts
+#    (see "Running unattended" below — skip this and your agents will sit
+#    at a trust prompt instead of working)
+./bin/swarm bootstrap
+
+# 2. bring up everything: worktrees, daemon, sessions, agents
 ./bin/swarm start
 
-# 2. give the swarm something to do
+# 3. give the swarm something to do
 ./bin/swarm task submit --id RATE-1 \
   --description "Add rate limiting to the login endpoint: 5 req/min per account"
 
-# 3. watch it flow
+# 4. watch it flow
 ./bin/swarm status
 ```
 
 That is the whole workflow. `swarm start` runs the pipeline in order and leaves
 a background handoff daemon running — you do **not** need a second terminal, and
 the terminal you started from can be closed.
+
+This is a real, verified path: `scripts/real-fourpack-e2e.sh` runs exactly this
+with live Codex agents and no human input after the submit.
 
 From here the agents drive themselves: each one runs `handoff ready`, does its
 role's job, sends the result to the next role with `handoff next`, and calls
@@ -176,6 +185,54 @@ worktrees as well, run `./bin/swarm worktrees remove` afterwards.
 The individual commands (`worktrees`, `sessions`, `agents`, `handoff daemon`)
 all still exist and are documented below — `start` and `stop` just compose them
 in the right order.
+
+## Running unattended
+
+An agent that has to ask permission is an agent that stops. By default roles
+are `interactive`, which is right when you are watching but **stalls a swarm
+you leave alone** — at Codex's trust prompt on first launch, then again before
+its first `git commit`.
+
+For a swarm that runs itself:
+
+```text
+window specifier codex wt-specifier task trusted
+window coder codex wt-coder task trusted
+window refactorer codex wt-refactorer task trusted
+window architect codex wt-architect task trusted
+
+writable /home/you/.cache/go-build
+writable /home/you/go/pkg/mod
+```
+
+then once per repository:
+
+```bash
+./bin/swarm bootstrap
+```
+
+| Policy | Asks permission? | Can commit? | Use for |
+|---|---|---|---|
+| `interactive` (default) | yes | yes, after you approve | supervised work |
+| `autonomous` | no | **no** — sandbox keeps `.git` read-only | unattended review, analysis |
+| `restricted` | no | no (read-only sandbox) | inspection only |
+| `trusted` | no | yes | unattended work you want finished |
+
+⚠️ **`trusted` disables Codex's sandbox**: full filesystem access, no prompts.
+It is the only policy under which an unattended agent can commit, because a role
+works in a linked worktree whose Git metadata lives in the main repository and
+Codex's sandbox protects `.git`. Swarm never selects it for you and never
+widens `autonomous` behind your back — you name it per role, in the file.
+Prefer `autonomous` where you can, and reserve `trusted` for a blast radius you
+understand: a scratch repo, a container, a VM.
+
+`writable` grants directories a sandboxed agent may write to besides its
+worktree — toolchain caches, typically. Without them `go test` fails, and an
+agent told to verify before committing will correctly refuse to commit.
+`swarm bootstrap` records the workspace trust Codex requires; it writes the same
+config entry answering the prompt would, and swarm never simulates the keystroke.
+
+Full detail: [`docs/backends/codex.md`](docs/backends/codex.md).
 
 ## How it is laid out on disk
 
@@ -1657,9 +1714,10 @@ proves it; everything else is listed as a gap, however finished the code looks.
 ## Current limitations
 
 - **Only Codex.** `claude` and others are not wired up yet.
-- **Agent status is a heuristic.** Codex runs as a Node process, so swarm reports
-  `running` when the pane's foreground process is *not* a shell. Any other
-  program you leave running in a managed session also reads as `running`.
+- **Agent liveness is a heuristic.** Codex runs as a Node process, so swarm
+  reports `running` when the pane's foreground process is *not* a shell — any
+  other program in a managed session reads the same way, which also makes
+  `AGENT_MISSING` a possible false positive.
 - **`agents stop` sends a single Ctrl-C.** If the agent ignores it or asks for
   confirmation, it may survive; check with `agents list`.
 - **Unix only.** Locking (`flock`), process groups and signals are POSIX;
@@ -1671,8 +1729,6 @@ proves it; everything else is listed as a gap, however finished the code looks.
 - **No `swarm clean` yet.** `swarm worktrees remove` is the manual path.
 - **`swarm logs` covers the daemon only.** Agents are interactive TUIs in tmux,
   so their output lives in pane scrollback — use `sessions attach`.
-- **Agent liveness is still a heuristic**, so `AGENT_MISSING` can be a false
-  positive if you leave another foreground program in a managed session.
 - **`stop` does not drain in-flight handoffs** before stopping the daemon;
   anything left in an outbox is delivered on the next start.
 - **Health is coarse** (`stopped`/`healthy`/`degraded`/`failed`) with no
@@ -1683,8 +1739,13 @@ proves it; everything else is listed as a gap, however finished the code looks.
 - **A `git_handoff` carries exactly one commit.** Ranges are not supported.
 - **Conflicts stop the line.** The cherry-pick aborts, `doctor` reports
   `INTEGRATION_FAILED`, and nothing resolves it for you — deliberately.
-- **Real-agent behavior is unproven.** Every test uses deterministic fake
-  agents, which proves the orchestrator, not that Codex follows the protocol.
+- **Unattended commits need `trusted`**, which turns Codex's sandbox off. See
+  [Running unattended](#running-unattended).
+- **One real cycle is not a reliability claim.** The full four-pack has been
+  proven to run unattended end to end; that is not yet evidence about flakiness,
+  long tasks, conflicting edits, or agents behaving badly under pressure.
+- **A real cycle costs minutes and quota** — roughly five minutes of model time
+  for a trivial task, which is why the real gates are opt-in and CI uses fakes.
 - **A multi-destination message has one shared fate for its source file** —
   all-delivered goes to `sent/`, anything else to `failed/` with the partial
   outcome recorded. Successful copies are never rolled back, but there is no
