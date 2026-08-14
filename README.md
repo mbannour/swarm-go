@@ -20,6 +20,7 @@ Clojure, no shell orchestration: one static binary and the standard library.
 - [Configuration: `swarm.conf`](#configuration-swarmconf)
 - [Prompts](#prompts)
 - [Command reference](#command-reference)
+  - [Recovery: `doctor` and `repair`](#recovery-doctor-and-repair)
   - [Submitting work: `task`](#submitting-work-task)
   - [Lifecycle: `start`, `status`, `stop`](#lifecycle-start-status-stop)
   - [Handoffs](#handoffs)
@@ -85,17 +86,24 @@ go run ./cmd/swarm doctor
 ```
 
 ```
-Swarm environment check
+Swarm Doctor
 
-✓ git        /usr/bin/git
-✓ tmux       /usr/bin/tmux
+Environment
+  ✓ git        /usr/bin/git
+  ✓ tmux       /usr/bin/tmux
+  ✓ codex      /home/you/.nvm/versions/node/v22.11.0/bin/codex
+  ○ claude     not installed
 
-Agent backends:
-✓ codex      /home/you/.nvm/versions/node/v22.11.0/bin/codex
-○ claude     not installed
+Diagnostics
+  ✓ no problems found
+
+Overall
+  healthy
 ```
 
-`✓` present, `○` optional and absent, `✗` required and missing.
+`✓` present, `○` optional and absent, `✗` required and missing. Once a swarm is
+running, `doctor` also diagnoses it — see
+[Recovery](#recovery-doctor-and-repair).
 
 ## Install
 
@@ -356,10 +364,90 @@ Secrets must never be put into a handoff.
 
 ```bash
 swarm version     # print the version
-swarm doctor      # check git, tmux and agent backends
+swarm doctor      # diagnose problems (read-only)
 swarm roles       # list the four-pack role names
 swarm config      # parse and print swarm.conf
 ```
+
+### Recovery: `doctor` and `repair`
+
+When something breaks — a killed daemon, a closed session, a machine that
+slept — these two commands are the whole recovery story:
+
+```bash
+swarm doctor            # what is wrong? changes nothing
+swarm doctor --json     # the same, for scripts and CI
+swarm repair --dry-run  # what would be fixed?
+swarm repair            # fix the safe ones
+```
+
+`doctor` inspects the repository, configuration, prompts, backends, worktrees,
+the tmux socket and every session, the daemon and its metadata, the runtime
+locks, and every durable handoff queue:
+
+```
+Diagnostics
+
+  daemon
+  ✗ DAEMON_NOT_RUNNING     the handoff daemon is not running; handoffs will not be delivered
+    → repairable with `swarm repair`
+  ⚠ DAEMON_STALE_PID       daemon metadata names a process that is not running
+    → repairable with `swarm repair`
+
+  coder
+  ⚠ WORKTREE_DIRTY         worktree …/wt-coder has uncommitted changes; commit or
+                           stash them yourself — swarm will not touch them
+
+Overall
+  degraded
+```
+
+Every finding has a **stable code** (`SESSION_MISSING`, `AGENT_MISSING`,
+`DAEMON_STALE_PID`, `HANDOFF_ORPHAN_DELIVERY`, …) so automation never has to
+parse prose. Health is `healthy`, `degraded`, `blocked` or `stopped`, and
+`swarm doctor` exits **0** for healthy or stopped, **1** for degraded, **2** for
+blocked.
+
+`repair` fixes only what is safe and deterministic: stale daemon metadata, a
+dead daemon, a stale socket, a missing session, an exited agent, an orphaned
+delivery, abandoned temp files. Everything else is reported for you:
+
+```
+Swarm Repair
+
+✓ remove stale daemon PID metadata
+✓ restart the handoff daemon
+
+Needs you (not repaired):
+
+  ! coder        WORKTREE_DIRTY   …uncommitted changes…
+
+Result: DEGRADED
+```
+
+The guarantees, in order of importance:
+
+- **Uncommitted work is never touched.** A dirty worktree is always reported,
+  never repaired — repair cannot know whether those changes matter.
+- **Nothing ambiguous is guessed.** Two current tasks in task mode, a worktree
+  on the wrong branch, a daemon lock held by an unidentifiable process: all
+  reported, none acted on.
+- **No unverified process is ever signalled.** A pid must agree with the lock
+  and the recorded repository first.
+- **Only managed state is touched** — `.swarm/`, this project's socket, this
+  project's worktrees.
+- `repair` holds the same lock as `start` and `stop`, so they cannot race.
+
+Failed handoffs are never retried behind your back:
+
+```bash
+swarm handoff retry <role> <handoff-id>
+```
+
+which re-validates first and refuses a permanently broken message.
+
+[`docs/recovery.md`](docs/recovery.md) walks through each failure case with the
+exact commands.
 
 ### Submitting work: `task`
 
@@ -1453,6 +1541,8 @@ proves it; everything else is listed as a gap, however finished the code looks.
 - **No `swarm clean` yet.** `swarm worktrees remove` is the manual path.
 - **`swarm logs` covers the daemon only.** Agents are interactive TUIs in tmux,
   so their output lives in pane scrollback — use `sessions attach`.
+- **Agent liveness is still a heuristic**, so `AGENT_MISSING` can be a false
+  positive if you leave another foreground program in a managed session.
 - **`stop` does not drain in-flight handoffs** before stopping the daemon;
   anything left in an outbox is delivered on the next start.
 - **Health is coarse** (`stopped`/`healthy`/`degraded`/`failed`) with no

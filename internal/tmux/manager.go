@@ -240,3 +240,16 @@ func (m *Manager) Remove(r RoleRef) (s Session, removed bool, err error) {
 
 	return s, true, nil
 }
+
+// ServerAlive reports whether a tmux server answers on this socket. The socket
+// file existing proves nothing: only a reply does.
+func (m *Manager) ServerAlive() bool {
+	if !Available() {
+		return false
+	}
+	_, err := run(m.Socket, "list-sessions", "-F", "#{session_name}")
+	if err == nil {
+		return true
+	}
+	return !isNoServer(err)
+}

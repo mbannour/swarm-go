@@ -18,7 +18,7 @@ import (
 
 func runHandoff(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: swarm handoff <send|next|inbox|outbox|ready|current|status|done|ack|daemon>")
+		fmt.Println("usage: swarm handoff <send|next|inbox|outbox|ready|current|status|done|retry|ack|daemon>")
 		os.Exit(1)
 	}
 
@@ -49,6 +49,8 @@ func runHandoff(args []string) {
 		fail(handoffStatus(life, args[1:]))
 	case "done":
 		fail(handoffDone(life, args[1:]))
+	case "retry":
+		fail(handoffRetry(store, wtMgr.Root, args[1:]))
 	case "ack":
 		fail(handoffAck(store, args[1:]))
 	case "daemon":

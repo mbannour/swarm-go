@@ -60,6 +60,21 @@ go test ./...            # everything except the tmux-level acceptance run
 | ✓ | Machine-readable status | `TestStatusJSON` |
 | ✓ | Two repositories running independently | `TestRepositoriesAreIndependent`, `TestIntegrationTwoRepositoriesAreIndependent` |
 | ✓ | Full cycle: developer → specifier → coder → refactorer → architect → specifier | `TestFourPackEndToEnd`, `./scripts/e2e-fourpack.sh` |
+| ✓ | Typed diagnostics with stable codes | `internal/diagnostics` |
+| ✓ | `swarm doctor` is read-only | `TestDiagnoseIsReadOnly` |
+| ✓ | `swarm doctor --json` | `TestReportJSON` |
+| ✓ | Daemon crash detection and repair | `TestRecoveryDaemonCrash` |
+| ✓ | Missing session detection and repair | `TestRecoveryMissingSession` |
+| ✓ | Missing agent detection and repair | `TestRecoveryMissingAgent` |
+| ✓ | Stale socket detection and safe removal | `TestRecoveryStaleSocket`, `TestRepairRefusesToRemoveLiveSocket` |
+| ✓ | Stale PID metadata recovery | `TestRecoveryStalePIDMetadata`, `TestStaleDaemonRecordIsRecovered` |
+| ✓ | Orphan delivery reconciled without duplication | `TestRecoveryOrphanDeliveryIsReconciledWithoutDuplication` |
+| ✓ | Dirty worktrees are never modified by repair | `TestRepairNeverTouchesDirtyWorktree`, `TestDirtyWorktreeIsNeverRepairable` |
+| ✓ | Ambiguous states blocked rather than guessed | `TestTaskModeCurrentCorruptionIsBlocking`, `TestRegisteredMissingWorktreeIsNotAutoRepaired` |
+| ✓ | `repair --dry-run` changes nothing | `TestDryRunTouchesNothing` |
+| ✓ | Repair cannot race start/stop/repair | `TestRepairHoldsTheLifecycleLock` |
+| ✓ | Temp-file cleanup limited to managed paths | `TestRepairCleansOnlyManagedTempFiles` |
+| ✓ | Explicit, validated handoff retry | `swarm handoff retry` |
 
 ## Gaps
 
@@ -73,7 +88,8 @@ Ordered roughly by how much they matter.
 | ☐ | **Route is code, not configuration** | `internal/handoff/route.go` is the single source, but per-project routes are not configurable. SwarmForge's two-pack and six-pack shapes are therefore out of reach. |
 | ☐ | **Batch handoffs collapse to one downstream message** | A batch's `source_handoff_id` is its first item's id, so a batch produces one downstream handoff rather than one per item. |
 | ☐ | **Duplicate protection is per current-work** | A role that legitimately wants two different downstream messages from one task gets the first back from `handoff next`; `handoff send` is the escape hatch. |
-| ☐ | **Agent liveness is a heuristic** | `pane_current_command` not being a shell counts as "running", so any foreground program reads as the agent. |
+| ☐ | **Agent liveness is a heuristic** | `pane_current_command` not being a shell counts as "running", so any foreground program reads as the agent — and `AGENT_MISSING` can therefore be a false positive. |
+| ☐ | **Notification recovery is not automatic** | A delivered handoff whose tmux wake-up failed is not re-notified by repair; the recipient finds it with `handoff ready`. |
 | ☐ | **`stop` does not drain in-flight handoffs** | Anything left in an outbox is delivered on the next start. |
 | ☐ | **No `swarm clean`** | `swarm worktrees remove` is the manual path. |
 | ☐ | **Agent logs are not captured** | Only the daemon writes a managed log; agent output lives in tmux scrollback. |

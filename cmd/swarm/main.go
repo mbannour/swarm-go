@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 
 	"github.com/mbannour/swarm-go/internal/config"
 	"github.com/mbannour/swarm-go/internal/roles"
@@ -39,7 +38,10 @@ func main() {
 		printRoles()
 
 	case "doctor":
-		runDoctor()
+		runDoctor(os.Args[2:])
+
+	case "repair":
+		runRepair(os.Args[2:])
 
 	case "worktrees":
 		runWorktrees(os.Args[2:])
@@ -101,6 +103,8 @@ func printUsage() {
 	fmt.Println(`Usage:
   swarm start                 bring the whole four-pack up
   swarm status [--json]       read-only overview
+  swarm doctor [--json]       diagnose problems (read-only)
+  swarm repair [--dry-run]    fix the safe ones
   swarm stop                  stop processes, keep durable state
   swarm logs daemon
   swarm task submit --id <id> --description <text>
@@ -138,40 +142,4 @@ func printRoles() {
 	for i, role := range roles.FourPack() {
 		fmt.Printf("  %d. %s\n", i+1, role.Name)
 	}
-}
-
-func runDoctor() {
-	fmt.Println("Swarm environment check")
-	fmt.Println()
-
-	checkCommand("git")
-	checkCommand("tmux")
-
-	fmt.Println()
-	fmt.Println("Agent backends:")
-
-	checkOptionalCommand("codex")
-	checkOptionalCommand("claude")
-}
-
-func checkCommand(name string) {
-	path, err := exec.LookPath(name)
-
-	if err != nil {
-		fmt.Printf("✗ %-10s not found\n", name)
-		return
-	}
-
-	fmt.Printf("✓ %-10s %s\n", name, path)
-}
-
-func checkOptionalCommand(name string) {
-	path, err := exec.LookPath(name)
-
-	if err != nil {
-		fmt.Printf("○ %-10s not installed\n", name)
-		return
-	}
-
-	fmt.Printf("✓ %-10s %s\n", name, path)
 }

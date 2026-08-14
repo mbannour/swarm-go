@@ -224,3 +224,104 @@ func resolve(path string) string {
 	}
 	return filepath.Clean(path)
 }
+
+// WorktreeBranch returns the branch a worktree has checked out, or "HEAD" when
+// it is detached.
+func (m *WorktreeManager) WorktreeBranch(path string) (string, error) {
+	return run(path, "rev-parse", "--abbrev-ref", "HEAD")
+}
+
+// WorktreeDirty reports whether a worktree has uncommitted changes.
+func (m *WorktreeManager) WorktreeDirty(path string) (bool, error) {
+	out, err := run(path, "status", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
+// PrunableManaged lists worktree registrations Git considers prunable,
+// restricted to paths under .swarm/worktrees.
+//
+// The listing is the reliable source: `git worktree list --porcelain` marks a
+// broken registration with `prunable` and still reports its original path, so
+// an unrelated external worktree can be recognised and left alone.
+func (m *WorktreeManager) PrunableManaged() ([]string, error) {
+	out, err := run(m.Root, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+
+	base := resolve(m.BaseDir())
+
+	var managed []string
+	var current string
+
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			current = strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
+		case strings.HasPrefix(line, "prunable"):
+			if current == "" {
+				continue
+			}
+			if rel, relErr := filepath.Rel(base, resolve(current)); relErr == nil &&
+				rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				managed = append(managed, current)
+			}
+		}
+	}
+
+	return managed, nil
+}
+
+// PruneManaged prunes stale worktree registrations, but only after confirming
+// that every prunable entry belongs to .swarm/worktrees. If Git also considers
+// an external worktree prunable, this refuses rather than pruning it too.
+func (m *WorktreeManager) PruneManaged() error {
+	managed, err := m.PrunableManaged()
+	if err != nil {
+		return err
+	}
+	if len(managed) == 0 {
+		return nil
+	}
+
+	all, err := m.allPrunable()
+	if err != nil {
+		return err
+	}
+	if len(all) != len(managed) {
+		return fmt.Errorf(
+			"refusing to prune: %d prunable worktree(s) are outside %s",
+			len(all)-len(managed), m.BaseDir())
+	}
+
+	_, err = run(m.Root, "worktree", "prune")
+
+	return err
+}
+
+// allPrunable lists every prunable worktree, managed or not.
+func (m *WorktreeManager) allPrunable() ([]string, error) {
+	out, err := run(m.Root, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+
+	var all []string
+	var current string
+
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			current = strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
+		case strings.HasPrefix(line, "prunable"):
+			if current != "" {
+				all = append(all, current)
+			}
+		}
+	}
+
+	return all, nil
+}
