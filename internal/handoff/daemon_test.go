@@ -20,12 +20,17 @@ type recorder struct {
 	err   error
 }
 
-func (r *recorder) Notify(role string) error {
+func (r *recorder) Notify(role, handoffID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.woken = append(r.woken, role)
 	return r.err
 }
+
+// ShouldRetry always agrees, so reconciliation behavior is visible in tests.
+func (r *recorder) ShouldRetry(role, handoffID string) bool { return true }
+
+func (r *recorder) Clear(role string) error { return nil }
 
 func (r *recorder) seen() []string {
 	r.mu.Lock()
@@ -546,5 +551,110 @@ func TestDaemonRunCreatesDirectories(t *testing.T) {
 		if _, err := os.Stat(dir); err != nil {
 			t.Errorf("%s was not created: %v", dir, err)
 		}
+	}
+}
+
+// Regression A — work that appears in an inbox without passing through the
+// daemon must still result in a notification.
+//
+// `task submit` writes straight to the entry role's inbox. The daemon only
+// notified on delivery, so nothing ever told the specifier to look and it sat
+// idle beside its work. Reconciliation is the safety net that catches it.
+func TestRegressionA_InboxWorkWithoutDeliveryStillNotifies(t *testing.T) {
+	d, s, n := newTestDaemon(t)
+	d.ReconcileEvery = time.Millisecond
+
+	// Simulate task submit: a message delivered directly, no outbox involved.
+	h := validNote()
+	h.From, h.To = "architect", []string{"specifier"}
+	entry, err := s.Send(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Deliver(entry.Handoff, "specifier"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MoveTo(entry.Path, "architect", BoxSent); err != nil {
+		t.Fatal(err)
+	}
+
+	// First pass only starts the reconciliation clock.
+	d.Scan()
+	if len(n.seen()) != 0 {
+		t.Fatalf("the first pass notified %v; it should only start the clock", n.seen())
+	}
+
+	time.Sleep(2 * time.Millisecond)
+
+	got := d.Scan()
+	if got.Renotified != 1 {
+		t.Fatalf("scan = %+v, want the stalled role re-notified", got)
+	}
+
+	woken := n.seen()
+	if len(woken) != 1 || woken[0] != "specifier" {
+		t.Errorf("woken = %v, want [specifier]", woken)
+	}
+
+	// The message itself is untouched: notification never moves work.
+	inbox, err := s.Inbox("specifier")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbox) != 1 {
+		t.Errorf("inbox = %d messages, want the original still there", len(inbox))
+	}
+}
+
+// A role that accepted its work needs no further prodding.
+func TestReconcileIgnoresRolesThatAreWorking(t *testing.T) {
+	d, s, n := newTestDaemon(t)
+	d.ReconcileEvery = time.Millisecond
+
+	h := validNote()
+	h.From, h.To = "architect", []string{"specifier"}
+	entry, _ := s.Send(h)
+	if _, _, err := s.Deliver(entry.Handoff, "specifier"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The role accepts it.
+	life := NewLifecycle(s, func(string) (ReceiveMode, error) { return ModeTask, nil })
+	if _, err := life.Ready("specifier"); err != nil {
+		t.Fatal(err)
+	}
+
+	d.Scan()
+	time.Sleep(2 * time.Millisecond)
+
+	if got := d.Scan(); got.Renotified != 0 {
+		t.Errorf("a working role was re-notified: %+v", got)
+	}
+	if len(n.seen()) != 0 {
+		t.Errorf("woken = %v, want nobody", n.seen())
+	}
+}
+
+// Reconciliation must not fire for a role notified moments ago in the same pass.
+func TestReconcileSkipsFreshlyNotifiedRoles(t *testing.T) {
+	d, s, n := newTestDaemon(t)
+	d.ReconcileEvery = time.Millisecond
+
+	d.Scan() // start the clock
+	time.Sleep(2 * time.Millisecond)
+
+	if _, err := s.Send(validGit()); err != nil { // coder -> refactorer
+		t.Fatal(err)
+	}
+
+	got := d.Scan()
+	if got.Delivered != 1 {
+		t.Fatalf("scan = %+v", got)
+	}
+	if got.Renotified != 0 {
+		t.Errorf("a role notified in this same pass was re-notified: %+v", got)
+	}
+	if woken := n.seen(); len(woken) != 1 {
+		t.Errorf("woken = %v, want exactly one wake-up", woken)
 	}
 }

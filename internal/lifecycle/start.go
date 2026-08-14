@@ -32,6 +32,7 @@ func (m *Manager) Preflight() []Check {
 	add("worktree paths", m.checkWorktreePaths())
 	add("tmux", m.checkTmux())
 	add("agent backends", m.checkBackends())
+	add("backend readiness", m.checkBackendReadiness())
 	add("prompts", m.checkPrompts())
 	add("runtime directory", m.checkRuntimeDir())
 
@@ -107,6 +108,22 @@ func (m *Manager) checkBackends() error {
 		}
 	}
 
+	return nil
+}
+
+// checkBackendReadiness refuses to start a swarm that would stall behind a
+// backend's own gates — a trust prompt or an unsupported approval policy.
+// Four agents waiting at four prompts is not a healthy swarm.
+func (m *Manager) checkBackendReadiness() error {
+	for _, r := range m.Roles {
+		state, reason := m.Env.BackendReady(r.Backend, r.Approval)
+		switch state {
+		case "ready", "", "unknown":
+			continue
+		default:
+			return fmt.Errorf("%s: %s (%s)", r.Name, reason, state)
+		}
+	}
 	return nil
 }
 

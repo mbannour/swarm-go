@@ -7,6 +7,7 @@ import (
 	"github.com/mbannour/swarm-go/internal/agent"
 	"github.com/mbannour/swarm-go/internal/git"
 	"github.com/mbannour/swarm-go/internal/handoff"
+	"github.com/mbannour/swarm-go/internal/notify"
 	"github.com/mbannour/swarm-go/internal/prompt"
 	"github.com/mbannour/swarm-go/internal/tmux"
 )
@@ -69,6 +70,7 @@ func (c CodingAgents) role(r Role) agent.Role {
 		Worktree:    r.Worktree,
 		Branch:      r.Branch,
 		ReceiveMode: r.ReceiveMode,
+		Approval:    agent.Approval(r.Approval),
 	}
 }
 
@@ -104,9 +106,21 @@ func (c CodingAgents) State(r Role) (string, error) {
 
 // HandoffWork adapts the durable handoff lifecycle.
 type HandoffWork struct {
-	Store *handoff.Store
-	Life  *handoff.Lifecycle
-	Roles []string
+	Store  *handoff.Store
+	Life   *handoff.Lifecycle
+	Roles  []string
+	Notify *notify.Tracker
+}
+
+// Notification reports the last wake-up attempt for a role.
+func (h HandoffWork) Notification(role string) (string, int, string) {
+	if h.Notify == nil {
+		return string(notify.StatusNotRequired), 0, ""
+	}
+
+	state := h.Notify.State(role)
+
+	return string(state.Status), state.Attempts, state.LastError
 }
 
 func (h HandoffWork) Work(role string) (string, string, error) {
@@ -180,4 +194,16 @@ func (e HostEnvironment) PromptsPresent(role string) error {
 
 func (e HostEnvironment) SwarmBinary() (string, error) {
 	return agent.ResolveBinary(e.RepoRoot)
+}
+
+// BackendReady asks the backend itself whether it can run unattended here.
+func (e HostEnvironment) BackendReady(backend, approval string) (string, string) {
+	b, ok := agent.BootstrapperFor(backend)
+	if !ok {
+		return "ready", "" // nothing to prepare
+	}
+
+	state, reason := b.Ready(e.RepoRoot, agent.Approval(approval))
+
+	return string(state), reason
 }

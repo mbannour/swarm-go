@@ -70,6 +70,7 @@ func agentRoles(cfg *config.Config, wtMgr *git.WorktreeManager) ([]agent.Role, e
 			Worktree:    wt.AbsPath,
 			Branch:      wt.Branch,
 			ReceiveMode: string(r.ReceiveMode),
+			Approval:    agent.Approval(r.Approval),
 		})
 	}
 

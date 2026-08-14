@@ -31,6 +31,7 @@ func newLifecycleManager() *lifecycle.Manager {
 			Worktree:     wt.AbsPath,
 			Branch:       wt.Branch,
 			ReceiveMode:  string(r.ReceiveMode),
+			Approval:     string(r.Approval),
 		})
 	}
 
@@ -52,9 +53,12 @@ func newLifecycleManager() *lifecycle.Manager {
 			RepoRoot: repoRoot,
 			SwarmBin: swarmBin,
 		},
-		Work: lifecycle.HandoffWork{Store: store, Life: life, Roles: roleNames},
-		Env:  lifecycle.HostEnvironment{RepoRoot: repoRoot},
-		Out:  os.Stdout,
+		Work: lifecycle.HandoffWork{
+			Store: store, Life: life, Roles: roleNames,
+			Notify: newWaker(repoRoot, false),
+		},
+		Env: lifecycle.HostEnvironment{RepoRoot: repoRoot},
+		Out: os.Stdout,
 	}
 }
 
@@ -236,16 +240,26 @@ func printStatus(s lifecycle.SwarmStatus) {
 }
 
 func printRoleTable(s lifecycle.SwarmStatus) {
-	fmt.Printf("%-12s %-10s %-10s %-10s %-10s %s\n",
-		"ROLE", "WORKTREE", "SESSION", "AGENT", "WORK", "TASK")
+	fmt.Printf("%-12s %-9s %-9s %-9s %-9s %-14s %s\n",
+		"ROLE", "WORKTREE", "SESSION", "AGENT", "WORK", "NOTIFICATION", "TASK")
 
 	for _, r := range s.Roles {
 		task := r.Task
 		if task == "" {
 			task = "-"
 		}
-		fmt.Printf("%-12s %-10s %-10s %-10s %-10s %s\n",
-			r.Role, r.Worktree, r.Session, r.Agent, r.Work, task)
+
+		// A failed wake-up is worth seeing at a glance: it is the difference
+		// between "idle" and "idle because nobody told it".
+		notification := r.Notification.Status
+		if notification == "" || notification == "not-required" {
+			notification = "-"
+		} else if r.Notification.Attempts > 1 {
+			notification = fmt.Sprintf("%s(%d)", notification, r.Notification.Attempts)
+		}
+
+		fmt.Printf("%-12s %-9s %-9s %-9s %-9s %-14s %s\n",
+			r.Role, r.Worktree, r.Session, r.Agent, r.Work, notification, task)
 	}
 }
 

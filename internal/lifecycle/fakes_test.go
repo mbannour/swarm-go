@@ -148,14 +148,24 @@ func (f *fakeAgents) State(r Role) (string, error) {
 	return "not-started", nil
 }
 
+type fakeNotification struct {
+	status   string
+	attempts int
+	err      string
+}
+
 type fakeWork struct {
-	states map[string]string
-	tasks  map[string]string
-	counts Counts
+	states        map[string]string
+	tasks         map[string]string
+	counts        Counts
+	notifications map[string]fakeNotification
 }
 
 func newFakeWork() *fakeWork {
-	return &fakeWork{states: map[string]string{}, tasks: map[string]string{}}
+	return &fakeWork{
+		states: map[string]string{}, tasks: map[string]string{},
+		notifications: map[string]fakeNotification{},
+	}
 }
 
 func (f *fakeWork) Work(role string) (string, string, error) {
@@ -168,12 +178,19 @@ func (f *fakeWork) Work(role string) (string, string, error) {
 
 func (f *fakeWork) Counts() (Counts, error) { return f.counts, nil }
 
+func (f *fakeWork) Notification(role string) (string, int, string) {
+	n := f.notifications[role]
+	return n.status, n.attempts, n.err
+}
+
 type fakeEnv struct {
-	tmux     bool
-	backends map[string]bool
-	prompts  error
-	bin      string
-	binErr   error
+	backendReady       string
+	backendReadyReason string
+	tmux               bool
+	backends           map[string]bool
+	prompts            error
+	bin                string
+	binErr             error
 }
 
 func newFakeEnv(bin string) *fakeEnv {
@@ -184,6 +201,13 @@ func (f *fakeEnv) TmuxAvailable() bool                  { return f.tmux }
 func (f *fakeEnv) BackendAvailable(backend string) bool { return f.backends[backend] }
 func (f *fakeEnv) PromptsPresent(role string) error     { return f.prompts }
 func (f *fakeEnv) SwarmBinary() (string, error)         { return f.bin, f.binErr }
+
+func (f *fakeEnv) BackendReady(backend, approval string) (string, string) {
+	if f.backendReady != "" {
+		return f.backendReady, f.backendReadyReason
+	}
+	return "ready", ""
+}
 
 // testRoles builds the four-pack against a repository root.
 func testRoles(repoRoot string) []Role {

@@ -13,6 +13,7 @@ import (
 	"github.com/mbannour/swarm-go/internal/git"
 	"github.com/mbannour/swarm-go/internal/handoff"
 	"github.com/mbannour/swarm-go/internal/lifecycle"
+	"github.com/mbannour/swarm-go/internal/notify"
 	"github.com/mbannour/swarm-go/internal/tmux"
 )
 
@@ -456,14 +457,12 @@ func handoffDaemon(store *handoff.Store, roles []string, repoRoot string, args [
 	}
 	defer lifecycle.ReleaseDaemonLock(repoRoot, lock)
 
-	var notifier handoff.Notifier
-	if !*quiet {
-		notifier = tmuxNotifier{tmux.NewManager(repoRoot)}
-	}
+	// One notification path for delivery, submission and reconciliation.
+	waker := newWaker(repoRoot, *quiet)
 
 	// Commits resolve against the project repository only — never a path
 	// taken from a handoff.
-	d := handoff.NewDaemon(store, roles, notifier, git.NewRepo(repoRoot))
+	d := handoff.NewDaemon(store, roles, waker, git.NewRepo(repoRoot))
 	d.Interval = *interval
 
 	// Stop cleanly on Ctrl-C or SIGTERM.
@@ -471,6 +470,18 @@ func handoffDaemon(store *handoff.Store, roles []string, repoRoot string, args [
 	defer stop()
 
 	return d.Run(ctx)
+}
+
+// newWaker builds the shared notification path for a repository.
+//
+// quiet disables waking entirely (used by tests and by operators who want
+// delivery without touching panes); everything else still records state.
+func newWaker(repoRoot string, quiet bool) *notify.Tracker {
+	var notifier notify.Notifier
+	if !quiet {
+		notifier = tmuxNotifier{tmux.NewManager(repoRoot)}
+	}
+	return notify.NewTracker(repoRoot, notifier)
 }
 
 // tmuxNotifier wakes a role's agent through the project's tmux socket. It

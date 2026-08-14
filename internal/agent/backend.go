@@ -21,6 +21,48 @@ type Backend interface {
 	// promptPath is a file containing the assembled prompt; workdir is the
 	// role's worktree. Implementations must quote every interpolated value.
 	Command(role, promptPath, workdir string) string
+
+	// Capabilities describes what this backend can be asked to do, so the
+	// orchestrator can check "can this run unattended?" instead of assuming.
+	Capabilities() Capabilities
+
+	// Launch returns the command line for a role under an approval policy.
+	// An unsupported policy must be an error, never a silent downgrade.
+	Launch(role, promptPath, workdir string, policy Approval) (string, error)
+}
+
+// Approval mirrors config.ApprovalPolicy without importing it, keeping the
+// backend layer independent of configuration parsing.
+type Approval string
+
+const (
+	ApprovalInteractive Approval = "interactive"
+	ApprovalAutonomous  Approval = "autonomous"
+	ApprovalRestricted  Approval = "restricted"
+)
+
+// Capabilities describes a backend's runtime abilities.
+type Capabilities struct {
+	// Interactive reports whether the backend runs as a terminal UI.
+	Interactive bool
+	// ApprovalPolicies lists the policies this backend can honour.
+	ApprovalPolicies []Approval
+	// WorkspaceTrust reports whether the backend gates on trusting a directory
+	// before it will run there.
+	WorkspaceTrust bool
+	// UnattendedStartup reports whether it can reach a working state with no
+	// human at the terminal, once bootstrapped.
+	UnattendedStartup bool
+}
+
+// Supports reports whether a policy is available.
+func (c Capabilities) Supports(policy Approval) bool {
+	for _, p := range c.ApprovalPolicies {
+		if p == policy {
+			return true
+		}
+	}
+	return false
 }
 
 // Lookup resolves a backend name from swarm.conf.
@@ -53,11 +95,53 @@ func (Codex) Name() string       { return "codex" }
 func (Codex) Executable() string { return "codex" }
 
 func (Codex) Command(role, promptPath, workdir string) string {
+	line, _ := Codex{}.Launch(role, promptPath, workdir, ApprovalInteractive)
+	return line
+}
+
+// Capabilities for the Codex CLI, verified against `codex --help`.
+func (Codex) Capabilities() Capabilities {
+	return Capabilities{
+		Interactive: true,
+		ApprovalPolicies: []Approval{
+			ApprovalInteractive, ApprovalAutonomous, ApprovalRestricted,
+		},
+		// Codex asks to trust a directory the first time it runs there, so a
+		// worktree must be trusted before an unattended launch.
+		WorkspaceTrust:    true,
+		UnattendedStartup: true,
+	}
+}
+
+// Launch builds the Codex command line for an approval policy.
+//
+// The flags come from `codex --help` on the installed version:
+//
+//	-a, --ask-for-approval <untrusted|on-request|never>
+//	-s, --sandbox <read-only|workspace-write|danger-full-access>
+//
+//	interactive  no flags — Codex asks before running commands
+//	autonomous   -a never -s workspace-write — no prompts, writes confined to
+//	             the worktree, network and the wider filesystem still sandboxed
+//	restricted   -a never -s read-only — unattended but unable to modify files
+func (Codex) Launch(role, promptPath, workdir string, policy Approval) (string, error) {
+	var flags string
+
+	switch policy {
+	case ApprovalInteractive, "":
+		flags = ""
+	case ApprovalAutonomous:
+		flags = " --ask-for-approval never --sandbox workspace-write"
+	case ApprovalRestricted:
+		flags = " --ask-for-approval never --sandbox read-only"
+	default:
+		return "", fmt.Errorf("codex does not support approval policy %q", policy)
+	}
+
 	return fmt.Sprintf(
-		"codex --cd %s \"$(cat %s)\"",
-		shellQuote(workdir),
-		shellQuote(promptPath),
-	)
+		"codex --cd %s%s \"$(cat %s)\"",
+		shellQuote(workdir), flags, shellQuote(promptPath),
+	), nil
 }
 
 // Fake is a deterministic stand-in used by the acceptance tests. It drives the
@@ -75,13 +159,30 @@ func (Fake) Executable() string { return FakeAgentExecutable }
 const FakeAgentExecutable = "swarm-fake-agent"
 
 func (Fake) Command(role, promptPath, workdir string) string {
+	line, _ := Fake{}.Launch(role, promptPath, workdir, ApprovalAutonomous)
+	return line
+}
+
+// Capabilities: the fake agent needs no approval and no trust gate.
+func (Fake) Capabilities() Capabilities {
+	return Capabilities{
+		Interactive: false,
+		ApprovalPolicies: []Approval{
+			ApprovalInteractive, ApprovalAutonomous, ApprovalRestricted,
+		},
+		WorkspaceTrust:    false,
+		UnattendedStartup: true,
+	}
+}
+
+func (Fake) Launch(role, promptPath, workdir string, policy Approval) (string, error) {
 	return fmt.Sprintf(
 		"%s %s %s %s",
 		FakeAgentExecutable,
 		shellQuote(role),
 		shellQuote(workdir),
 		shellQuote(promptPath),
-	)
+	), nil
 }
 
 // shellQuote wraps s in single quotes so the shell treats it as one literal

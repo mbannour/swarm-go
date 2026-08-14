@@ -11,7 +11,7 @@ import (
 
 func runSessions(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: swarm sessions <create|list|attach <role>|remove>")
+		fmt.Println("usage: swarm sessions <create|list|attach <role>|capture <role>|remove>")
 		os.Exit(1)
 	}
 
@@ -37,6 +37,11 @@ func runSessions(args []string) {
 			fail(fmt.Errorf("usage: swarm sessions attach <role>"))
 		}
 		fail(sessionsAttach(mgr, refs, args[1]))
+	case "capture":
+		if len(args) < 2 {
+			fail(fmt.Errorf("usage: swarm sessions capture <role>"))
+		}
+		fail(sessionsCapture(mgr, refs, args[1]))
 	case "remove":
 		fail(sessionsRemove(mgr, refs))
 	default:
@@ -115,6 +120,23 @@ func sessionsAttach(mgr *tmux.Manager, refs []tmux.RoleRef, role string) error {
 		return err
 	}
 	return mgr.Attach(ref)
+}
+
+// sessionsCapture prints what a role's pane currently shows. It is a debugging
+// aid — the fastest way to see that an agent is blocked on a prompt.
+func sessionsCapture(mgr *tmux.Manager, refs []tmux.RoleRef, role string) error {
+	if _, err := findRef(refs, role); err != nil {
+		return err
+	}
+
+	out, err := mgr.CapturePane(tmux.SessionName(role))
+	if err != nil {
+		return err
+	}
+
+	fmt.Print(out)
+
+	return nil
 }
 
 func sessionsRemove(mgr *tmux.Manager, refs []tmux.RoleRef) error {

@@ -37,6 +37,9 @@ type Role struct {
 	Worktree    string // absolute path
 	Branch      string
 	ReceiveMode string
+	// Approval is the autonomy this role's agent was granted. Empty means
+	// interactive: autonomy is always opted into.
+	Approval Approval
 }
 
 // Manager launches and stops agents in existing tmux sessions.
@@ -136,7 +139,10 @@ func (m *Manager) Start(r Role, assembled string) (started bool, err error) {
 	}
 
 	session := tmux.SessionName(r.Name)
-	line := backend.Command(r.Name, promptPath, r.Worktree)
+	line, err := backend.Launch(r.Name, promptPath, r.Worktree, r.Approval)
+	if err != nil {
+		return false, fmt.Errorf("role %q: %w", r.Name, err)
+	}
 
 	// The command line and the Enter key are sent as separate tmux arguments;
 	// the prompt text itself stays in the file.

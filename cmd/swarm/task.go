@@ -78,7 +78,7 @@ func taskSubmit(store *handoff.Store, repoRoot string, args []string) error {
 	// A submitted task lands straight in the inbox, so the daemon — which only
 	// notifies on delivery from an outbox — never sees it. Without this the
 	// entry role sits idle with work waiting and nothing telling it to look.
-	if err := wakeRole(repoRoot, *to); err != nil {
+	if err := wakeRole(repoRoot, *to, entry.ID); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not wake %s: %v\n", *to, err)
 		fmt.Println("NOTIFIED: no")
 		return nil
@@ -89,22 +89,25 @@ func taskSubmit(store *handoff.Store, repoRoot string, args []string) error {
 	return nil
 }
 
-// wakeRole tells a role's agent to check its inbox. A role with no running
-// session is not an error: the work is durable and `handoff ready` finds it.
-func wakeRole(repoRoot, role string) error {
+// wakeRole tells a role's agent to check its inbox, through the same tracked
+// path the daemon uses — so a submitted task is notified, recorded and
+// reconciled exactly like a delivered one.
+//
+// A role with no running session is not an error: the work is durable and
+// `handoff ready` finds it whenever the agent starts.
+func wakeRole(repoRoot, role, handoffID string) error {
 	if !tmux.Available() {
 		return nil
 	}
 
 	mgr := tmux.NewManager(repoRoot)
-	session := tmux.SessionName(role)
 
-	live, err := mgr.HasSession(session)
+	live, err := mgr.HasSession(tmux.SessionName(role))
 	if err != nil || !live {
 		return err
 	}
 
-	return tmuxNotifier{mgr}.Notify(role)
+	return newWaker(repoRoot, false).Notify(role, handoffID)
 }
 
 // taskTrace reconstructs a task's journey from durable handoff metadata.

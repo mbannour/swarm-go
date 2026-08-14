@@ -61,6 +61,11 @@ func (m *Manager) Status(ctx context.Context) (SwarmStatus, error) {
 				roleStatus.Work = work
 				roleStatus.Task = task
 			}
+
+			status, attempts, lastErr := m.Work.Notification(r.Name)
+			roleStatus.Notification = NotificationStatus{
+				Status: status, Attempts: attempts, Error: lastErr,
+			}
 		}
 
 		status.Roles = append(status.Roles, roleStatus)

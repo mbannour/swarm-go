@@ -33,7 +33,11 @@ func TestLoadFourPack(t *testing.T) {
 	if len(cfg.Roles) != 4 {
 		t.Fatalf("got %d roles, want 4", len(cfg.Roles))
 	}
-	if cfg.Roles[1] != (RoleConfig{Name: "coder", Backend: "codex", Worktree: "wt-coder", ReceiveMode: ReceiveTask}) {
+	want := RoleConfig{
+		Name: "coder", Backend: "codex", Worktree: "wt-coder",
+		ReceiveMode: ReceiveTask, Approval: ApprovalInteractive,
+	}
+	if cfg.Roles[1] != want {
 		t.Errorf("unexpected role: %+v", cfg.Roles[1])
 	}
 	if err := cfg.ValidateFourPack(); err != nil {
@@ -69,5 +73,52 @@ func TestValidateFourPackRejects(t *testing.T) {
 		if err := cfg.ValidateFourPack(); err == nil {
 			t.Errorf("%s: expected a validation error", name)
 		}
+	}
+}
+
+// Approval is optional and defaults to interactive, so existing four-field
+// configurations keep working and autonomy is never granted implicitly.
+func TestApprovalPolicyDefaultsToInteractive(t *testing.T) {
+	cfg, err := Load(write(t, fourPack))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, r := range cfg.Roles {
+		if r.Approval != ApprovalInteractive {
+			t.Errorf("%s approval = %q, want interactive by default", r.Name, r.Approval)
+		}
+	}
+}
+
+func TestApprovalPolicyIsParsed(t *testing.T) {
+	body := `window specifier codex wt-specifier task autonomous
+window coder codex wt-coder task restricted
+window refactorer codex wt-refactorer task interactive
+window architect codex wt-architect batch autonomous
+`
+
+	cfg, err := Load(write(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]ApprovalPolicy{
+		"specifier":  ApprovalAutonomous,
+		"coder":      ApprovalRestricted,
+		"refactorer": ApprovalInteractive,
+		"architect":  ApprovalAutonomous,
+	}
+
+	for _, r := range cfg.Roles {
+		if r.Approval != want[r.Name] {
+			t.Errorf("%s approval = %q, want %q", r.Name, r.Approval, want[r.Name])
+		}
+	}
+}
+
+func TestUnknownApprovalPolicyIsRejected(t *testing.T) {
+	if _, err := Load(write(t, "window coder codex wt-coder task yolo\n")); err == nil {
+		t.Error("an unknown approval policy was accepted")
 	}
 }

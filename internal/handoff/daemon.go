@@ -24,36 +24,62 @@ type CommitResolver interface {
 	ResolveCommit(abbrev string) (string, error)
 }
 
+// Waker wakes a role about a specific handoff and remembers whether it worked.
+// It is the single notification path: delivery, task submission and
+// reconciliation all go through it, so behavior cannot drift between them.
+type Waker interface {
+	// Notify wakes a role. The error is informational — a delivered handoff is
+	// never rolled back because nobody could be told about it.
+	Notify(role, handoffID string) error
+	// ShouldRetry reports whether re-notifying now is worthwhile.
+	ShouldRetry(role, handoffID string) bool
+	// Clear forgets a role's notification state once it has accepted work.
+	Clear(role string) error
+}
+
 // Daemon scans configured outboxes and delivers messages to inboxes.
 // One bad file never stops the loop.
 type Daemon struct {
 	Store    *Store
 	Roles    []string       // configured role names, in configuration order
-	Notifier Notifier       // may be nil: delivery still happens, nobody is woken
+	Waker    Waker          // may be nil: delivery still happens, nobody is woken
 	Commits  CommitResolver // may be nil: git_handoff commits are then unverifiable
 	Interval time.Duration
 	Log      io.Writer
+
+	// ReconcileEvery bounds how often the daemon re-checks for roles that have
+	// work waiting but never picked it up. A wake-up can be missed; the durable
+	// inbox is what actually decides whether there is work to do.
+	ReconcileEvery time.Duration
+
+	lastReconcile time.Time
 }
 
+// DefaultReconcileEvery is how often stalled roles are re-checked. Seconds,
+// not milliseconds: this is a safety net for a missed wake-up, not a poll loop.
+const DefaultReconcileEvery = 10 * time.Second
+
 // NewDaemon returns a daemon with sane defaults.
-func NewDaemon(store *Store, roles []string, n Notifier, commits CommitResolver) *Daemon {
+func NewDaemon(store *Store, roles []string, w Waker, commits CommitResolver) *Daemon {
 	return &Daemon{
-		Store:    store,
-		Roles:    roles,
-		Notifier: n,
-		Commits:  commits,
-		Interval: DefaultInterval,
-		Log:      os.Stdout,
+		Store:          store,
+		Roles:          roles,
+		Waker:          w,
+		Commits:        commits,
+		Interval:       DefaultInterval,
+		ReconcileEvery: DefaultReconcileEvery,
+		Log:            os.Stdout,
 	}
 }
 
 // ScanResult summarises one pass over every outbox.
 type ScanResult struct {
-	Delivered int // destination copies written
-	Duplicate int // destination copies already present
-	Sent      int // logical handoffs fully delivered
-	Rejected  int // invalid messages quarantined
-	Failed    int // valid requests that could not be completed
+	Delivered  int // destination copies written
+	Duplicate  int // destination copies already present
+	Sent       int // logical handoffs fully delivered
+	Rejected   int // invalid messages quarantined
+	Failed     int // valid requests that could not be completed
+	Renotified int // roles re-notified because work was waiting untouched
 }
 
 // Run scans until the context is cancelled.
@@ -88,7 +114,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 func (d *Daemon) Scan() ScanResult {
 	var result ScanResult
 
-	woken := map[string]bool{}
+	// role -> the handoff that justifies waking it.
+	woken := map[string]string{}
 
 	for _, role := range d.Roles {
 		dir, err := d.Store.OutboxDir(role)
@@ -114,15 +141,80 @@ func (d *Daemon) Scan() ScanResult {
 		}
 	}
 
-	for role := range woken {
-		d.notify(role)
+	for role, id := range woken {
+		d.notify(role, id)
 	}
+
+	// Safety net: a wake-up can be typed into a busy agent and lost. The inbox
+	// is the truth, so re-check roles that have work but never took it.
+	d.reconcile(&result, woken)
 
 	return result
 }
 
+// reconcile re-notifies roles that have runnable work but no current work.
+//
+// A role that has accepted its work needs nothing; a role with an untouched
+// inbox may simply never have heard. Attempts are rate-limited and capped by
+// the Waker, so a wedged agent is reported rather than flooded.
+func (d *Daemon) reconcile(result *ScanResult, justWoken map[string]string) {
+	if d.Waker == nil {
+		return
+	}
+
+	every := d.ReconcileEvery
+	if every <= 0 {
+		every = DefaultReconcileEvery
+	}
+	// The first pass only starts the clock: reconciliation is a safety net for
+	// a wake-up that went unheard, and nothing has had a chance to be unheard
+	// yet.
+	if d.lastReconcile.IsZero() {
+		d.lastReconcile = time.Now()
+		return
+	}
+	if time.Since(d.lastReconcile) < every {
+		return
+	}
+	d.lastReconcile = time.Now()
+
+	for _, role := range d.Roles {
+		// Notified moments ago in this same pass: give the agent a chance.
+		if _, fresh := justWoken[role]; fresh {
+			continue
+		}
+
+		current, err := d.Store.List(role, BoxCurrent)
+		if err != nil {
+			continue
+		}
+		if len(current) > 0 {
+			// It is working: the wake-up did its job.
+			_ = d.Waker.Clear(role)
+			continue
+		}
+
+		inbox, err := d.Store.List(role, BoxInbox)
+		if err != nil || len(inbox) == 0 {
+			_ = d.Waker.Clear(role)
+			continue
+		}
+
+		SortEntries(inbox)
+		top := inbox[0]
+
+		if !d.Waker.ShouldRetry(role, top.ID) {
+			continue
+		}
+
+		d.logf("reconcile: %s has work waiting but has not accepted it; re-notifying", role)
+		d.notify(role, top.ID)
+		result.Renotified++
+	}
+}
+
 // process handles one logical handoff from a role's outbox.
-func (d *Daemon) process(role string, e Entry, result *ScanResult, woken map[string]bool) {
+func (d *Daemon) process(role string, e Entry, result *ScanResult, woken map[string]string) {
 	// 1. Is the message itself well formed? A fault here is permanent.
 	if err := Validate(e.Handoff, d.Store.Roles, role); err != nil {
 		d.reject(e.Path, role, err.Error())
@@ -168,7 +260,7 @@ func (d *Daemon) process(role string, e Entry, result *ScanResult, woken map[str
 		default:
 			result.Delivered++
 			delivered++
-			woken[to] = true
+			woken[to] = h.ID
 			d.logf("delivered %s -> %s (%s, priority %d, id %s)", h.From, to, h.Type, h.Priority, short(h.ID))
 			_ = path
 		}
@@ -228,11 +320,11 @@ func (d *Daemon) fail(role, path, reason string) {
 // Notification is best effort by design: the message is already durable in the
 // inbox, so a failed wake-up is logged and never rolls back a delivery. The
 // recipient finds the work with `swarm handoff ready <role>`.
-func (d *Daemon) notify(role string) {
-	if d.Notifier == nil {
+func (d *Daemon) notify(role, handoffID string) {
+	if d.Waker == nil {
 		return
 	}
-	if err := d.Notifier.Notify(role); err != nil {
+	if err := d.Waker.Notify(role, handoffID); err != nil {
 		d.logf("delivered successfully; notification to %s failed: %v", role, err)
 	}
 }

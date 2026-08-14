@@ -277,3 +277,8 @@ func (m *Manager) SendPrompt(name, text string) error {
 
 	return m.SendKeys(name, "Enter")
 }
+
+// CapturePane returns what a session's active pane currently shows.
+func (m *Manager) CapturePane(name string) (string, error) {
+	return run(m.Socket, "capture-pane", "-p", "-t", name)
+}

@@ -3,90 +3,132 @@
 Where this Go implementation stands against the SwarmForge four-pack workflow it
 reimplements.
 
-A box is only ticked when a test proves it. "Proven by" names the test or script
-that would fail if the behavior regressed. Anything unproven is listed as a gap,
-even where the code looks finished.
+Every claim names the evidence, and evidence has three strengths:
 
-Run everything below with:
+| Level | Meaning |
+|---|---|
+| **UNIT** | proven by a unit test against the real component |
+| **FAKE E2E** | proven end-to-end with deterministic fake agents, no model |
+| **REAL** | proven with a real Codex agent, unattended |
+
+A box is only ticked when a named test proves it. Anything unproven is a gap,
+however finished the code looks.
 
 ```bash
-go test ./...            # everything except the tmux-level acceptance run
-./scripts/e2e-fourpack.sh   # the full CLI cycle, requires tmux
+./scripts/parity.sh                              # deterministic gate: build, vet, test, -race, fake E2E
+RUN_REAL_CODEX_TESTS=1 ./scripts/real-codex-smoke.sh   # opt-in, costs model quota
 ```
 
-## Proven
+## Categories
 
-| | Feature | Proven by |
+### Configuration
+| | Feature | Evidence |
 |---|---|---|
-| ✓ | Four roles from configuration | `config` tests, `TestValidateFourPack*` |
-| ✓ | `swarm.conf` parsing and validation | `internal/config` |
-| ✓ | Role prompts, shared constitution | `internal/prompt` |
-| ✓ | Shared runtime protocol in every prompt | `TestAssembleIncludesEverySection`, `TestShippedPromptsAssemble` |
-| ✓ | Stable agent binary path (`SWARM_BIN`) | `TestAssembleLifecycleCommandsUseTheBinary`, `binary_test.go` |
-| ✓ | Git worktree per role | `internal/git`, `TestWorktreeLifecycle` |
-| ✓ | Deterministic branches `swarm/<role>` | `TestBranchName`, e2e `assertWorktreeIsolation` |
-| ✓ | Worktree isolation (separate branches, no cross-contamination) | `assertWorktreeIsolation`, `e2e-fourpack.sh` |
-| ✓ | Project-isolated tmux socket | `TestSocketPath`, `TestDaemonLocksAreRepositoryScoped` |
-| ✓ | tmux session per role, started in its worktree | `TestSessionLifecycle` |
-| ✓ | Agent launch inside the session | `internal/agent`, `e2e-fourpack.sh` |
-| ✓ | Backend abstraction (codex, fake) | `TestLookup`, `TestCodexCommand` |
-| ✓ | Durable handoffs on disk | `internal/handoff` store tests |
-| ✓ | Handoff daemon with delivery | `TestScanDeliversAndCanonicalisesCommit` |
-| ✓ | Single daemon per repository (real lock) | `TestDaemonCannotStartTwice` |
-| ✓ | `note` handoffs | `TestUnmarshalNote`, e2e |
-| ✓ | `git_handoff` with a 10-character commit | `TestValidateCommitLength` |
-| ✓ | Commit resolution against the project repository | `TestResolveCommit*`, `TestResolveCommitIsRepositoryScoped` |
-| ✓ | Canonical commit delivered to the receiver | `TestScanDeliversAndCanonicalisesCommit`, e2e |
-| ✓ | Priority ordering, oldest-first ties | `TestSelectTask*`, `TestListOrdersByPriorityThenAge` |
-| ✓ | Task receive mode | `TestReadyTaskModeMovesOneItemToCurrent` |
-| ✓ | Batch receive mode | `TestReadyBatchModeTakesEveryTopPriorityItem`, `TestBatchRoleTakesEveryTopPriorityItem` |
-| ✓ | `ready` / `current` / `done` lifecycle | `internal/handoff/lifecycle_test.go` |
-| ✓ | inbox / outbox / sent / failed / rejected / current / completed | `TestEnsureDirsCreatesEveryBox`, `TestRejectAndFailAreDistinct` |
-| ✓ | Four-pack routing | `TestNextRole`, `TestRouteIsAClosedCycle` |
-| ✓ | Idempotent downstream handoff (`handoff next`) | `TestAdvanceIsIdempotentForTheSameWork` |
-| ✓ | Duplicate prevention across a crash | `TestCrashBetweenSendAndDone` (unit + e2e) |
-| ✓ | Restart recovery of current work | `TestRestartDuringActiveWork`, `TestReadySurvivesRestart` |
-| ✓ | Send-before-done semantics | `TestFailedSendLeavesWorkActive` |
-| ✓ | Delivery idempotency by handoff id | `TestDeliverIsIdempotent` |
-| ✓ | Notification failure never loses a handoff | `TestScanSurvivesNotifierFailure` |
-| ✓ | Malformed input never stops the daemon | `TestScanRejectsMalformedFileAndKeepsGoing` |
-| ✓ | External task boundary (`task submit`) | `TestFourPackEndToEnd` |
-| ✓ | Run traceability from durable metadata | `assertTraceable`, `swarm task trace` |
-| ✓ | `swarm start` / `status` / `stop` lifecycle | `internal/lifecycle` |
-| ✓ | Ordered startup and shutdown | `TestStartOrder`, `TestStopOrder` |
-| ✓ | Idempotent start and stop | `TestStartIsIdempotent`, `TestStopIsIdempotent` |
-| ✓ | Partial startup reported, not pretended | `TestPartialStartupIsReportedAndFails` |
-| ✓ | `stop` preserves worktrees and handoffs | `TestStopPreservesDurableState` |
-| ✓ | Machine-readable status | `TestStatusJSON` |
-| ✓ | Two repositories running independently | `TestRepositoriesAreIndependent`, `TestIntegrationTwoRepositoriesAreIndependent` |
-| ✓ | Full cycle: developer → specifier → coder → refactorer → architect → specifier | `TestFourPackEndToEnd`, `./scripts/e2e-fourpack.sh` |
-| ✓ | Typed diagnostics with stable codes | `internal/diagnostics` |
-| ✓ | `swarm doctor` is read-only | `TestDiagnoseIsReadOnly` |
-| ✓ | `swarm doctor --json` | `TestReportJSON` |
-| ✓ | Daemon crash detection and repair | `TestRecoveryDaemonCrash` |
-| ✓ | Missing session detection and repair | `TestRecoveryMissingSession` |
-| ✓ | Missing agent detection and repair | `TestRecoveryMissingAgent` |
-| ✓ | Stale socket detection and safe removal | `TestRecoveryStaleSocket`, `TestRepairRefusesToRemoveLiveSocket` |
-| ✓ | Stale PID metadata recovery | `TestRecoveryStalePIDMetadata`, `TestStaleDaemonRecordIsRecovered` |
-| ✓ | Orphan delivery reconciled without duplication | `TestRecoveryOrphanDeliveryIsReconciledWithoutDuplication` |
-| ✓ | Dirty worktrees are never modified by repair | `TestRepairNeverTouchesDirtyWorktree`, `TestDirtyWorktreeIsNeverRepairable` |
-| ✓ | Ambiguous states blocked rather than guessed | `TestTaskModeCurrentCorruptionIsBlocking`, `TestRegisteredMissingWorktreeIsNotAutoRepaired` |
-| ✓ | `repair --dry-run` changes nothing | `TestDryRunTouchesNothing` |
-| ✓ | Repair cannot race start/stop/repair | `TestRepairHoldsTheLifecycleLock` |
-| ✓ | Temp-file cleanup limited to managed paths | `TestRepairCleansOnlyManagedTempFiles` |
-| ✓ | Explicit, validated handoff retry | `swarm handoff retry` |
-| ✓ | Handed-off commits applied to the receiver's worktree | `TestIntegrateFastForward`, `assertIntegrationHappened`, `e2e-fourpack.sh` |
-| ✓ | Fast-forward when history is linear | `TestIntegrateFastForward` |
-| ✓ | Cherry-pick when branches diverged | `TestIntegrateCherryPick` |
-| ✓ | Conflicts abort cleanly and block | `TestIntegrateConflictAbortsCleanly`, `TestFailedIntegrationIsBlocking` |
-| ✓ | Integration refuses dirty worktrees | `TestIntegrateRefusesDirtyWorktree` |
-| ✓ | Integration refuses the wrong branch | `TestIntegrateRefusesWrongBranch` |
-| ✓ | Integration is idempotent, including after a cherry-pick rewrite | `TestIntegrateIsIdempotent`, `TestCherryPickIsIdempotent` |
-| ✓ | Source and local commit identity both recorded | `TestIntegrationMetadataRoundTrips`, `swarm task trace` |
-| ✓ | Integration state survives a restart | `TestIntegrationStateSurvivesRestart` |
-| ✓ | Integration metadata is orchestrator-owned | `TestSendClearsIntegrationMetadata` |
-| ✓ | Notes need no integration | `TestIntegrateNoteRequiresNothing` |
-| ✓ | Failed integration keeps work current | `TestIntegrateFailureIsRecordedAndWorkStaysCurrent` |
+| ✓ | Four roles, worktrees, receive modes from `swarm.conf` | UNIT `internal/config` |
+| ✓ | Approval policy field, defaulting to interactive | UNIT `TestApprovalPolicyDefaultsToInteractive`, `TestApprovalPolicyIsParsed` |
+| ✓ | Unknown policy rejected | UNIT `TestUnknownApprovalPolicyIsRejected` |
+
+### Worktrees
+| | Feature | Evidence |
+|---|---|---|
+| ✓ | One isolated worktree and branch per role | UNIT `internal/git`; FAKE E2E `assertWorktreeIsolation` |
+| ✓ | Repo root resolves from inside a worktree | UNIT `TestRepoRootFromLinkedWorktree` |
+| ✓ | Safe removal and pruning, never `rm -rf` | UNIT `internal/git` |
+
+### tmux
+| | Feature | Evidence |
+|---|---|---|
+| ✓ | Project-isolated socket, session per role | UNIT `internal/tmux` |
+| ✓ | Wake-up is submitted, not merely typed | UNIT `TestSendPromptSubmitsTheLine` (**regression B**) |
+| ✓ | Two independent repositories side by side | UNIT `TestIntegrationTwoRepositoriesAreIndependent` |
+
+### Prompts
+| | Feature | Evidence |
+|---|---|---|
+| ✓ | Constitution + runtime protocol + role + generated context | UNIT `internal/prompt` |
+| ✓ | Stable `SWARM_BIN` path, temp builds refused | UNIT `binary_test.go` |
+| ✓ | Agents obey the protocol unprompted | **REAL** — observed ready → work → next → done |
+
+### Handoffs
+| | Feature | Evidence |
+|---|---|---|
+| ✓ | Durable files, daemon delivery, priority ordering | UNIT `internal/handoff` |
+| ✓ | `git_handoff` with a resolved 10-character commit | UNIT + FAKE E2E |
+| ✓ | Idempotent delivery, no duplicates after a crash | UNIT `TestCrashBetweenSendAndDone` |
+| ✓ | Well-formed `git_handoff` produced by a real agent | **REAL** — coder → refactorer |
+
+### Receiver lifecycle
+| | Feature | Evidence |
+|---|---|---|
+| ✓ | ready / current / done, task and batch modes | UNIT `internal/handoff/lifecycle_test.go` |
+| ✓ | Restart resumes current work | UNIT `TestRestartDuringActiveWork` |
+| ✓ | Send-before-done keeps work active on failure | UNIT `TestFailedSendLeavesWorkActive` |
+
+### Git integration
+| | Feature | Evidence |
+|---|---|---|
+| ✓ | Fast-forward, cherry-pick, conflict abort | UNIT `internal/git/integrate_test.go` |
+| ✓ | Idempotent by patch equivalence | UNIT `TestCherryPickIsIdempotent` |
+| ✓ | Dirty worktree and wrong branch refused | UNIT `TestIntegrateRefusesDirtyWorktree` |
+| ✓ | Every handoff integrated before downstream work | FAKE E2E `assertIntegrationHappened` |
+| ✓ | Real agent commits real, passing code | **REAL** — tests passed in the coder's worktree |
+
+### Lifecycle
+| | Feature | Evidence |
+|---|---|---|
+| ✓ | Ordered start/stop, idempotent, partial startup reported | UNIT `internal/lifecycle` |
+| ✓ | `stop` preserves worktrees and handoffs | UNIT `TestStopPreservesDurableState` |
+| ✓ | Machine-readable status | UNIT `TestStatusJSON` |
+
+### Recovery
+| | Feature | Evidence |
+|---|---|---|
+| ✓ | Typed diagnostics, safe repair, dry run | UNIT `internal/diagnostics`, `internal/repair` |
+| ✓ | Daemon/session/agent/socket/PID/orphan recovery | UNIT `internal/lifecycle/recovery_test.go` |
+| ✓ | Dirty worktrees never touched by repair | UNIT `TestRepairNeverTouchesDirtyWorktree` |
+
+### Notification reliability
+| | Feature | Evidence |
+|---|---|---|
+| ✓ | One notification path for delivery, submit and reconcile | UNIT `internal/notify` |
+| ✓ | `task submit` notifies the entry role | UNIT `TestRegressionA_InboxWorkWithoutDeliveryStillNotifies` (**regression A**); **REAL** — `NOTIFIED: yes`, specifier woke |
+| ✓ | Delivery and notification are separate states | UNIT `internal/notify` |
+| ✓ | Bounded retry, capped attempts, no flood | UNIT `TestShouldRetryWaitsForTheInterval`, `TestRetriesAreCapped` |
+| ✓ | Reconciliation catches an unheard wake-up | UNIT `TestReconcileIgnoresRolesThatAreWorking` |
+| ✓ | Notification state in `status` and `--json` | UNIT `internal/lifecycle` |
+
+### Backend autonomy
+| | Feature | Evidence |
+|---|---|---|
+| ✓ | interactive / autonomous / restricted policies | UNIT `internal/agent/regression_test.go` |
+| ✓ | Autonomous launch carries validated flags | UNIT `TestRegressionC_AutonomousLaunchCarriesApprovalFlags` (**regression C**) |
+| ✓ | Unsupported policy fails loudly | UNIT `TestUnsupportedPolicyIsAnError` |
+| ✓ | Backend capability model | UNIT `TestCapabilities` |
+| ✓ | Agent commits without an approval prompt | **REAL** — see the smoke test |
+
+### Backend bootstrap
+| | Feature | Evidence |
+|---|---|---|
+| ✓ | Workspace trust detected, unattended start refused until ready | UNIT `TestReadinessBlocksOnUntrustedWorkspace` |
+| ✓ | `swarm bootstrap` records trust via Codex's own config | **REAL** — smoke test bootstrap step |
+| ✓ | Interactive roles may still meet the prompt | UNIT `TestReadinessAllowsInteractiveWithoutTrust` |
+
+### Fake-agent E2E
+| | Feature | Evidence |
+|---|---|---|
+| ✓ | Full cycle, developer → specifier → … → specifier | FAKE E2E `TestFourPackEndToEnd`, `scripts/e2e-fourpack.sh` |
+| ✓ | Restart mid-flight, duplicate prevention, isolation | FAKE E2E |
+
+### Real-agent smoke
+| | Feature | Evidence |
+|---|---|---|
+| ✓ | Unattended submit → specifier → coder → refactorer | **REAL** `scripts/real-codex-smoke.sh` |
+| ✓ | No manual tmux typing, Enter or approval | **REAL** — the script fails if a wait times out |
+
+### Real four-pack E2E
+| | Feature | Evidence |
+|---|---|---|
+| ☐ | Full real cycle through architect and back | pending — see gaps |
 
 ## Gaps
 

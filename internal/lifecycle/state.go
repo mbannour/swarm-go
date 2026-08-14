@@ -57,16 +57,29 @@ type Role struct {
 	Worktree     string // absolute path
 	Branch       string
 	ReceiveMode  string
+	Approval     string // interactive | autonomous | restricted
+}
+
+// NotificationStatus is what status reports about waking a role.
+type NotificationStatus struct {
+	Status   string `json:"status"`             // pending | sent | failed | not-required
+	Attempts int    `json:"attempts,omitempty"` //
+	Error    string `json:"error,omitempty"`    //
 }
 
 // RoleStatus is what status reports for one role.
+//
+// Session, Agent, Work and Notification are deliberately separate: a session
+// can exist with no agent, an agent can be running with nothing to do, and work
+// can be waiting for a role that was never successfully told about it.
 type RoleStatus struct {
-	Role     string         `json:"name"`
-	Worktree ComponentState `json:"worktree"`
-	Session  ComponentState `json:"session"`
-	Agent    ComponentState `json:"agent"`
-	Work     string         `json:"work"`           // waiting | ready | working
-	Task     string         `json:"task,omitempty"` // the current task, if any
+	Role         string             `json:"name"`
+	Worktree     ComponentState     `json:"worktree"`
+	Session      ComponentState     `json:"session"`
+	Agent        ComponentState     `json:"agent"`
+	Work         string             `json:"work"`           // waiting | ready | working
+	Task         string             `json:"task,omitempty"` // the current task, if any
+	Notification NotificationStatus `json:"notification"`
 }
 
 // Counts summarises durable handoff state across all roles.

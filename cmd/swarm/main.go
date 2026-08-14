@@ -43,6 +43,9 @@ func main() {
 	case "repair":
 		runRepair(os.Args[2:])
 
+	case "bootstrap":
+		runBootstrap(os.Args[2:])
+
 	case "worktrees":
 		runWorktrees(os.Args[2:])
 
@@ -105,6 +108,7 @@ func printUsage() {
   swarm status [--json]       read-only overview
   swarm doctor [--json]       diagnose problems (read-only)
   swarm repair [--dry-run]    fix the safe ones
+  swarm bootstrap             prepare backends for unattended use
   swarm stop                  stop processes, keep durable state
   swarm logs daemon
   swarm task submit --id <id> --description <text>

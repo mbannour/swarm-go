@@ -40,6 +40,8 @@ type WorkService interface {
 	Work(role string) (state string, task string, err error)
 	// Counts summarises durable handoff state across all roles.
 	Counts() (Counts, error)
+	// Notification reports the last wake-up attempt for a role.
+	Notification(role string) (status string, attempts int, lastError string)
 }
 
 // Environment answers preflight questions about the machine.
@@ -50,6 +52,9 @@ type Environment interface {
 	PromptsPresent(role string) error
 	// SwarmBinary returns a stable executable path for background components.
 	SwarmBinary() (string, error)
+	// BackendReady reports whether a backend can actually start working for a
+	// role under its configured policy — not merely whether it is installed.
+	BackendReady(backend, approval string) (state string, reason string)
 }
 
 // Manager coordinates the components. It owns ordering and locking; the
